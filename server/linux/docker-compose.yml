@@ -1,0 +1,137 @@
+# SWVAULT 1.4: fresh-VM Cloudflare/R2 setup. Run sudo ./setup.sh to populate private .env first.
+# A remotely managed Cloudflare Tunnel routes vault.<domain> -> http://localhost:8080.
+# Git LFS direct R2 GET URLs bypass this tunnel and are signed per file.
+name: swvault
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:${CLOUDFLARED_TAG:-latest}
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run", "--token-file", "/run/secrets/tunnel-token"]
+    volumes:
+      - ./data/cloudflare/tunnel-token:/run/secrets/tunnel-token:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
+      - "127.0.0.1:8080:8080"
+
+  gitea:
+    image: docker.gitea.com/gitea:${GITEA_TAG:-1.27.3}
+    network_mode: service:cloudflared
+    restart: unless-stopped
+    depends_on:
+      - cloudflared
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: ${GITEA_SECRET_KEY:-}
+      GITEA__security__INTERNAL_TOKEN: ${GITEA_INTERNAL_TOKEN:-}
+      GITEA__server__LFS_JWT_SECRET: ${GITEA_LFS_JWT_SECRET:-}
+      GITEA__oauth2__JWT_SECRET: ${GITEA_OAUTH_JWT_SECRET:-}
+      GITEA__server__DOMAIN: ${VAULT_HOSTNAME:-localhost}
+      GITEA__server__ROOT_URL: https://${VAULT_HOSTNAME:-localhost}/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__server__OFFLINE_MODE: "true"
+      GITEA__server__LFS_START_SERVER: "true"
+      GITEA__server__LFS_MAX_FILE_SIZE: "4294967296"
+      # Gitea signs per-object R2 URLs for direct GETs. No public bucket is needed.
+      GITEA__lfs__STORAGE_TYPE: minio
+      GITEA__lfs__SERVE_DIRECT: "true"
+      GITEA__lfs__MINIO_ENDPOINT: ${R2_ACCOUNT_ID:-unset}.r2.cloudflarestorage.com
+      GITEA__lfs__MINIO_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      GITEA__lfs__MINIO_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      GITEA__lfs__MINIO_BUCKET: ${R2_BUCKET:-swvault-lfs}
+      GITEA__lfs__MINIO_LOCATION: auto
+      GITEA__lfs__MINIO_BASE_PATH: lfs/
+      GITEA__lfs__MINIO_USE_SSL: "true"
+      # R2 S3 compatibility: avoid unsupported x-amz-checksum-algorithm headers.
+      GITEA__lfs__MINIO_CHECKSUM_ALGORITHM: md5
+      GITEA__lfs__MINIO_BUCKET_LOOKUP_TYPE: path
+      GITEA__repository__DEFAULT_BRANCH: main
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "true"
+      GITEA__service__DEFAULT_KEEP_EMAIL_PRIVATE: "true"
+      GITEA__service__DEFAULT_USER_VISIBILITY: private
+      GITEA__openid__ENABLE_OPENID_SIGNIN: "false"
+      GITEA__mailer__ENABLED: "false"
+      GITEA__api__ENABLE_SWAGGER: "false"
+      GITEA__cron.update_checker__ENABLED: "false"
+      GITEA__log__LEVEL: Warn
+    volumes:
+      - ./data/gitea:/data
+
+  invites:
+    image: python:${PYTHON_TAG:-3.13-alpine}
+    network_mode: service:cloudflared
+    restart: unless-stopped
+    depends_on:
+      - gitea
+    command: ["python", "-u", "/app/invites.py"]
+    environment:
+      ORG: ${ORG:-team}
+      TEAM_NAME: ${TEAM_NAME:-Team}
+      REPO: ${REPO:-cad}
+      GITEA_URL: http://127.0.0.1:3000
+      ADMIN_TOKEN_FILE: /run/swvault/admin-token
+      STATE_DIR: /data
+      EMAIL_DOMAINS: ${EMAIL_DOMAINS:-none}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    volumes:
+      - ./invites:/app:ro
+      - ./data/admin-token:/run/swvault/admin-token:ro
+      - ./data/invites:/data
+
+  # Opt-in 1.4 coordinator. S3 UploadPart PUTs go directly from Windows to R2.
+  # This service ONLY receives auth/control JSON and reads a verified cold copy
+  # from R2 to register LFS through supported Gitea API paths.
+  r2-transfer:
+    build:
+      context: ./r2-transfer
+    image: swvault-r2-transfer:1.4.0
+    network_mode: service:cloudflared
+    restart: unless-stopped
+    depends_on:
+      - gitea
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?Set R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?Set R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?Set R2_SECRET_ACCESS_KEY}
+      R2_BUCKET: ${R2_BUCKET:?Set R2_BUCKET}
+      ORG: ${ORG:?Set ORG}
+      REPO: ${REPO:?Set REPO}
+      ADMIN_USER: ${ADMIN_USER:?Set ADMIN_USER}
+      ADMIN_TOKEN_FILE: /run/swvault/admin-token
+      GITEA_URL: http://127.0.0.1:3000
+      COLD_LFS_DIR: /cold-lfs
+      TRANSFER_DATA_DIR: /state
+    volumes:
+      - ./data/admin-token:/run/swvault/admin-token:ro
+      - ./data/r2-transfer:/state
+      - ./data/cold-lfs:/cold-lfs
+
+  proxy:
+    image: caddy:${CADDY_TAG:-2-alpine}
+    network_mode: service:cloudflared
+    restart: unless-stopped
+    depends_on:
+      - gitea
+      - invites
+      - r2-transfer
+    volumes:
+      - ./Caddyfile.cloudflare:/etc/caddy/Caddyfile:ro

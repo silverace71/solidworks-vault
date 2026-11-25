@@ -1,0 +1,24 @@
+# OPTIONAL pilot bridge: run legacy Tailscale Funnel while Cloudflare Tunnel is primary.
+# Only enable after validating this on a cloned VM. This is NOT direct R2 multipart upload.
+# The old *.ts.net URL stays up so pre-migration clients can check in and fetch updates.
+services:
+  tailscale-bridge:
+    image: tailscale/tailscale:${TAILSCALE_TAG:-stable}
+    restart: unless-stopped
+    network_mode: service:cloudflared
+    depends_on:
+      - cloudflared
+      - proxy
+    hostname: ${TS_HOSTNAME:-swvault}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin

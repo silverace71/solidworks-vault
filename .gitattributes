@@ -1,0 +1,6 @@
+# The server runs these on Linux straight from a release archive.
+*.sh text eol=lf
+server/** text eol=lf
+*.ps1 text
+*.dll binary
+*.png binary

@@ -1,0 +1,143 @@
+# Every night: if main changed since the last release, build and test it and make a GitHub release.
+# The team's server looks here each night (server/linux/auto-update.sh) and publishes what it finds,
+# so a change merged to main reaches everyone's SwVault by the next morning.
+#
+# Version: version.txt holds MAJOR.MINOR; the last number is the count of commits since that file
+# last changed. For a new minor or major version, edit version.txt (the count starts again at 0).
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   TEAM_JSON           the server's team.json (which vault the installer joins)
+#   TEAM_ICON_PNG_B64   optional: team-icon.png, base64 (the team's tray icon)
+name: Nightly release
+
+on:
+  schedule:
+    - cron: '7 7 * * *' # 07:07 UTC, about 1 AM in Colorado; the server checks at 10:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      client: ${{ steps.plan.outputs.client }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: |
+          set -euo pipefail
+          base="$(tr -d ' \r\n' < version.txt)"
+          [[ "$base" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::version.txt must hold MAJOR.MINOR, e.g. 1.2 (got '$base')"; exit 1; }
+          since="$(git log -1 --format=%H -- version.txt)"
+          version="$base.$(git rev-list --count "$since..HEAD")"
+          previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          release=true; client=true
+          if [[ -n "$previous" ]]; then
+            # What ends up on people's PCs, and what ends up on the server. Docs and tests alone release nothing.
+            git diff --quiet "$previous" HEAD -- src scripts lib Directory.Build.props Directory.Packages.props version.txt && client=false
+            if [[ "$client" == false ]] && git diff --quiet "$previous" HEAD -- server; then release=false; fi
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then release=false; fi
+          [[ "$release" == true ]] || client=false
+          {
+            echo "version=$version"
+            echo "release=$release"
+            echo "client=$client"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $version (previous release: ${previous:-none}); release: $release; installer: $client" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Notes
+        if: steps.plan.outputs.release == 'true'
+        run: |
+          previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          git log --no-merges --format='- %s' ${previous:+"$previous..HEAD"} | head -n 40 > notes.md
+          [[ -s notes.md ]] || echo "- Maintenance" > notes.md
+          cat notes.md
+      - name: Check and pack the server files
+        if: steps.plan.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          for f in server/linux/*.sh server/backup/*.sh; do bash -n "$f"; done
+          python3 -m py_compile server/linux/invites/*.py server/linux/r2-transfer/service.py
+          python3 -m pip install 'boto3==1.40.74' 'requests==2.32.5'
+          python3 -m unittest discover -s tests/r2-transfer -p 'test_*.py' -v
+          git archive --format=tar.gz -o swvault-server.tar.gz HEAD server
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.release == 'true'
+        with:
+          name: plan
+          path: |
+            notes.md
+            swvault-server.tar.gz
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.client == 'true'
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Test
+        run: dotnet test SwVault.slnx -c Release
+      - name: Team settings
+        shell: pwsh
+        env:
+          TEAM_JSON: ${{ vars.TEAM_JSON }}
+          TEAM_ICON_PNG_B64: ${{ vars.TEAM_ICON_PNG_B64 }}
+        run: |
+          if (-not $env:TEAM_JSON) { throw 'Set the repository variable TEAM_JSON to the contents of the server''s team.json (Settings > Secrets and variables > Actions > Variables).' }
+          $null = $env:TEAM_JSON | ConvertFrom-Json
+          [IO.File]::WriteAllText("$PWD\team.json", $env:TEAM_JSON)
+          if ($env:TEAM_ICON_PNG_B64) { [IO.File]::WriteAllBytes("$PWD\team-icon.png", [Convert]::FromBase64String($env:TEAM_ICON_PNG_B64)) }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { throw 'Inno Setup did not install.' }
+      - name: Package
+        shell: pwsh
+        run: |
+          .\scripts\package.ps1 -Version '${{ needs.plan.outputs.version }}' -TeamConfig .\team.json
+          if (-not (Get-ChildItem dist\*-Setup.exe)) { throw 'The setup wizard was not built.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          if-no-files-found: error
+          path: |
+            dist/*.zip
+            dist/*-Setup.exe
+
+  release:
+    needs: [plan, build]
+    if: ${{ always() && needs.plan.outputs.release == 'true' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -l
+          files=(swvault-server.tar.gz)
+          shopt -s nullglob
+          files+=(*.zip *-Setup.exe)
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "SwVault $VERSION" --notes-file notes.md "${files[@]}"

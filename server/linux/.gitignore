@@ -1,0 +1,6 @@
+data/
+.env
+team.json
+.env.r2.production
+*.bak
+*-PRIVATE-config-*.tar.gz

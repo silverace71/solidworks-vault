@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwVault Files</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main id="signin" class="signin" hidden>
+    <form id="signin-form" class="signin-card" autocomplete="on">
+      <img src="icon.svg" alt="" class="signin-logo">
+      <h1>SwVault Files</h1>
+      <p class="muted" id="signin-team">Sign in with your vault account.</p>
+      <label>User name <input name="username" autocomplete="username" required autofocus></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <p class="error" id="signin-error" role="alert" hidden></p>
+      <button type="submit" class="primary">Sign in</button>
+      <p class="muted small">The same user name and password as SwVault. Forgot it? Ask a vault admin.</p>
+    </form>
+  </main>
+
+  <div id="app" class="app" hidden>
+    <header class="bar">
+      <a class="brand" href="#" id="home" title="SwVault" aria-label="SwVault"><img src="logo.svg" alt="" class="logo on-dark"><img src="logo-light.svg" alt="" class="logo on-light"></a>
+      <div class="search">
+        <input id="search" type="search" placeholder="Search names, part numbers, materials, notes... (typos and initials work)" autocomplete="off" spellcheck="false" aria-label="Search the vault">
+      </div>
+      <select id="type" aria-label="File type">
+        <option value="">All files</option>
+      </select>
+      <select id="status" aria-label="Status"></select>
+      <button id="folders-toggle" class="ghost only-narrow" type="button" aria-label="Folders">Folders</button>
+      <button id="accounts-toggle" class="ghost" type="button" hidden>Accounts</button>
+      <div class="user">
+        <span id="user-name" class="muted"></span>
+        <button id="signout" class="ghost" type="button">Sign out</button>
+      </div>
+    </header>
+    <p class="hint muted small" id="search-hint">Narrow by a property with <code>name:value</code>, e.g. <code>material:6061</code>, <code>by:alice</code>, <code>state:released</code>, <code>rev:B</code>. Quotes keep words together.</p>
+
+    <section id="accounts" class="accounts" aria-label="Accounts" hidden>
+      <div class="accounts-head">
+        <h2>Accounts</h2>
+        <span class="muted" id="accounts-summary"></span>
+      </div>
+      <p class="muted small">Everyone with an account on this vault server. Disabling an account stops it signing in; its history and check-outs stay. Admins can manage accounts and release anyone's check-out; you can't remove your own admin access.</p>
+      <p class="error" id="accounts-error" role="alert" hidden></p>
+      <div class="updates" id="updates" hidden>
+        <div class="updates-text">
+          <strong>SwVault updates</strong> <span class="muted" id="updates-published"></span>
+          <p class="small" id="updates-status" role="status"></p>
+        </div>
+        <button id="updates-run" type="button" title="Builds and tests the newest code on GitHub, then publishes it to everyone if anything changed">Check for updates now</button>
+      </div>
+      <div class="table-wrap"><table id="accounts-table"></table></div>
+    </section>
+
+    <div class="main" id="main">
+      <nav id="folders" class="folders" aria-label="Folders"></nav>
+      <section class="results" aria-live="polite">
+        <div class="summary"><span id="summary"></span><button id="clear-folder" class="chip" type="button" hidden></button></div>
+        <div id="grid" class="grid"></div>
+        <button id="more" class="ghost more" type="button" hidden>Show more</button>
+      </section>
+      <aside id="details" class="details" aria-label="File details">
+        <div class="empty muted">Select a file to see everything about it.</div>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="review-dialog">
+    <form method="dialog" id="review-form">
+      <h2>Request a review</h2>
+      <p class="muted" id="review-file"></p>
+      <fieldset class="kinds">
+        <legend>Kind</legend>
+        <label><input type="radio" name="kind" value="design" checked> Design</label>
+        <label><input type="radio" name="kind" value="simulation"> Simulation</label>
+        <label><input type="radio" name="kind" value="drawing"> Drawing</label>
+      </fieldset>
+      <label>Lead to ask <select name="lead" required></select></label>
+      <label>Note for the lead <textarea name="message" rows="4" placeholder="What should they look at?"></textarea></label>
+      <p class="error" id="review-error" hidden></p>
+      <div class="buttons">
+        <button value="cancel" type="button" id="review-cancel" class="ghost">Cancel</button>
+        <button value="send" type="submit" class="primary">Send request</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="fuzzy.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

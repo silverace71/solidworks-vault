@@ -1,0 +1,42 @@
+# Build output (normally redirected to %LOCALAPPDATA%\SwVaultBuild by Directory.Build.props)
+artifacts/
+dist/
+bin/
+obj/
+TestResults/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Your team's server settings (copied from the server to build the installer)
+/team.json
+/team-icon.png
+
+# Local dev data
+*.log
+
+# Python bytecode (the team service)
+__pycache__/
+*.pyc
+
+# A team's own logo for the web file browser (copied to the server, not part of SwVault)
+server/linux/invites/web/logo.svg
+server/linux/invites/web/logo-light.svg
+# Never commit VM secrets or local credential archives
+**/.env.r2.production
+**/*-PRIVATE-config-*.tar.gz
+
+# 1.4 private deployment state: NEVER commit these
+**/.env
+**/.env.*
+!**/.env.example
+server/linux/data/
+server/linux/team.json
+server/linux/backup/
+server/linux/*-private*.tar.gz
+server/linux/invites/installer/
+*.tar.gz.sha256

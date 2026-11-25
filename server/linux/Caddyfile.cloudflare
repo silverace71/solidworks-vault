@@ -1,0 +1,14 @@
+:8080 {
+  encode zstd gzip
+  @r2transfer path /swvault-transfer/*
+  handle @r2transfer {
+    reverse_proxy 127.0.0.1:3200
+  }
+  @invites path /swvault-invites /swvault-invites/* /swvault /swvault/*
+  handle @invites {
+    reverse_proxy 127.0.0.1:3100
+  }
+  handle {
+    reverse_proxy 127.0.0.1:3000
+  }
+}
