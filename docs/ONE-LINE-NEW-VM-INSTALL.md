@@ -28,7 +28,13 @@ Dry run (still prompts for all values, but makes no SWVAULT deployment changes):
 curl -fsSLo /tmp/swvault-install.sh https://raw.githubusercontent.com/silverace71/solidworks-vault/main/install.sh && sudo bash /tmp/swvault-install.sh --dry-run
 ```
 
-Use the **same one-liner to resume** after Ctrl+C, SSH disconnection, or a failed package download. Do not clear `/opt/swvault/server/linux/data` or `.env` to “try again.” Once deploying starts, changes are not transactionally atomic, but the wizard preserves state for retry and never modifies the original VM.
+Use the **same one-liner after an interruption**. When saved wizard state exists, it offers:
+
+- `resume` — continue with saved settings and secrets, preserving the previously approved source commit.
+- `restart` — go back through **all setup questions** (including Cloudflare, R2, email, backups and migration), then require new deployment approval. Saved nonsecret settings are the defaults; secrets must be entered again. **Restart does not erase or reinstall an existing vault database or delete R2 objects.** Organization, repo, admin identity and R2 storage identity cannot be silently changed on an initialized vault.
+- `quit` — stop immediately.
+
+Use `--dry-run` to preview new choices without starting Docker or changing the installed server. A prior configuration is saved root-only before applying new answers. Do not clear `/opt/swvault/server/linux/data`, `.env`, or `/var/lib/swvault-installer` to “try again.” Once deploying starts, changes are not entirely transactional, so review the saved settings and status before allowing users back in.
 
 ## Prepare these values BEFORE running
 
@@ -42,22 +48,33 @@ Use the **same one-liner to resume** after Ctrl+C, SSH disconnection, or a faile
 | R2 bucket name | Cloudflare → R2 → create private Standard bucket (e.g., `swvault-lfs`). Avoid public bucket access. |
 | R2 account ID | From R2 Overview / S3 endpoint (`<ACCOUNT_ID>.r2.cloudflarestorage.com`). Standard bucket only for the supplied config. |
 | R2 S3 credentials | R2 → API Tokens → Object Read & Write → limit to SWVAULT bucket. Copy Access Key ID and Secret Access Key while shown. |
-| Backup destination | Mount an independent filesystem/disk, e.g. `/mnt/swvault-backups`. The wizard refuses `/` root drive for backups. |
+| Backups (optional) | Choose `yes` to schedule nightly backups or `no` to skip them entirely. Choosing `no` disables `swvault-backup.timer` but **does not delete existing backups**. |
+| Backup directory (only if yes) | Choose an absolute path on an independently mounted disk, e.g. `/mnt/backups/swvault`. You can choose to have the installer **create that folder after DEPLOY**. The disk itself must already be mounted. |
+| Import staging folder (only if importing) | Choose an existing folder or let the installer create it. This is separate from scheduled backups. A full-history 1.2.9 import still requires an independent disk for its one-time rollback snapshot, even if nightly backups are off. |
 | Email | SMTP server/port, sender email, SMTP login, app password and address for a test email; or explicitly choose `no` email. For Gmail, use a dedicated app password, not the normal Gmail login password. |
 | Migration | Choose 0=no import; 1=local final 1.2.9 export; 2=remote final export over SSH; 3=local CAD folder; 4=remote CAD folder. |
 
 Cloudflare links: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/ and https://developers.cloudflare.com/r2/get-started/s3/ . Docker installation details: https://docs.docker.com/engine/install/ubuntu/ .
 
-### Prepare the independent backup disk
+### Optional backups and automatic folder creation
 
-Attach and mount your backup disk inside the VM and confirm that it is a **different filesystem** before setup. A sample check:
+At `Enable nightly scheduled backups?`, answer **`yes`** or **`no`** (blank input is rejected).
+
+- **No** — the installer won't schedule automatic backups and won't require a backup directory. Your VM can still keep verified cold LFS copies as part of normal R2 transfers; those are **not** a substitute for an independent disaster-recovery backup. The original 1.2.9 VM should remain available until the migration is proven.
+- **Yes** — attach and mount an independent disk or filesystem first. At the backup directory prompt, supply e.g. `/mnt/backups/swvault`. If it doesn't exist, answer `yes` to **create the directory after DEPLOY**; the wizard will make the folder with restricted permissions. It does **not** repartition or mount a disk for you.
+
+Useful checks on the VM:
 
 ```bash
 lsblk -f
-df -h / /mnt/swvault-backups
+findmnt -T /mnt/backups
+# Compare against the root filesystem:
+df -h / /mnt/backups
 ```
 
-If you do not have an independent backup disk yet, stop and attach one rather than using a directory on the same OS disk.
+**Important:** creating `/mnt/backups` on the root disk does not make it a second disk. If you choose backups, the wizard refuses an unmounted/root-disk destination to prevent false reassurance.
+
+**One-time full-vault import exception:** Even if you chose `no` for scheduled backups, replacing the new VM's test database with a complete 1.2.9 export requires an independent staging/rollback location. The installer requests that location separately and can create its subdirectory on the already-mounted disk. No recurring backup timer is enabled by that import.
 
 ### Email configuration
 
@@ -74,7 +91,7 @@ The installer attempts a test message after Gitea/invites start and records the 
 
 **Full original SWVAULT 1.2.9 export (`.tar.gz` and `.sha256`):** Preserves Gitea accounts, Git commits, history, locks, LFS objects and invitation data. Best option for moving the actual vault rather than just current CAD files. The wizard verifies archive SHA-256 and separately asks for `IMPORT_129` before replacing the NEW VM's test data. If you decline this step, it stages the archive without importing. This step is not safe while users continue making changes on the old VM; freeze it only at the final cutover window.
 
-**Plain CAD folder:** `rsync` copies the folder to the independent staging filesystem, preserving the directory tree. **It does not populate the vault automatically.** Build/install the Windows client, then use the SWVAULT/SOLIDWORKS **Import Folder** workflow on a designated workstation. This creates proper Git LFS metadata and checks-in the files; copying into `data/gitea` would not. To use Windows files, share/mount the source folder into the VM read-only first (e.g. a CIFS mount), then give the wizard the mounted Linux path.
+**Plain CAD folder:** `rsync` copies the folder to the selected import staging location (not necessarily a backup disk), preserving the directory tree. **It does not populate the vault automatically.** Build/install the Windows client, then use the SWVAULT/SOLIDWORKS **Import Folder** workflow on a designated workstation. This creates proper Git LFS metadata and checks-in the files; copying into `data/gitea` would not. To use Windows files, share/mount the source folder into the VM read-only first (e.g. a CIFS mount), then give the wizard the mounted Linux path.
 
 **Another VM:** choose option 2/4 and provide `user@private-LAN-IP` and the absolute remote archive/folder path. Install `openssh-server` and `rsync` on the remote machine, set up SSH authentication/host-key trust, and verify the private network route. If your Proxmox nodes have 100Gb networking, the guest VMs need their **own** interfaces/bridges to access that network; a Proxmox migration interface is not automatically visible inside a VM.
 
@@ -101,8 +118,9 @@ This is never run by the installer. Keep the original 1.2.9 VM frozen for rollba
 ## Recovery and security
 
 - Ctrl+C before `DEPLOY` stops without changing any SWVAULT services.
-- Interrupted or failed post-`DEPLOY` runs leave `.env` and data in place; rerun the same installer, choose `resume`. Package downloads, image updates and Gitea initialization are not fully transactional; check logs before promoting to production.
-- Full-history import snapshots the NEW VM's pre-import state onto the independent backup filesystem and attempts to restore it on error. The original VM is not modified by the new-VM installer.
+- Interrupted or failed post-`DEPLOY` runs leave `.env` and data in place; rerun the same installer, choose `resume` to reuse saved settings or `restart` to re-answer all questions without wiping the vault. If you restart, an older `.env` copy is saved under `/var/lib/swvault-installer/config-checkpoints/` before replacing settings. Package downloads, image updates and Gitea initialization are not fully transactional; check logs before promoting to production.
+- With nightly backups disabled, `swvault-backup.timer` is not enabled. No existing archive is deleted when that option is changed.
+- Full-history import still snapshots the NEW VM's pre-import state to the independent **import staging** filesystem and attempts to restore it on error, even if scheduled backups were disabled. The original VM is not modified by the new-VM installer.
 - Root-only secrets live in `/opt/swvault/server/linux/.env`, Cloudflare token mount and R2 configuration. Never commit these or unredacted export archives to public GitHub.
 - R2 storage over the free allowance incurs charges even when direct R2 downloads have zero egress charges.
 - Do **not** disable Defender or antivirus to install the Windows client; investigate any detection first.
@@ -117,7 +135,7 @@ The safest order is **not** to freeze 1.2.9 as soon as the 1.4 VM is created:
 4. On the new VM, import the received archive manually (change `newuser` to the SSH transfer user's Linux login):
 
    ```bash
-   sudo /opt/swvault/server/linux/import-129-fresh-vm.sh /home/newuser/swvault-transfer/swvault-129-final.tar.gz /mnt/swvault-backups
+   sudo /opt/swvault/server/linux/import-129-fresh-vm.sh /home/newuser/swvault-transfer/swvault-129-final.tar.gz /mnt/independent-import-disk/swvault-staging
    ```
 
 5. Run R2 signed-download verification and pilot a real 500MB+ check-in from one updated Windows client. Inspect Gitea history, file locks and email delivery.

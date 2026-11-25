@@ -21,7 +21,14 @@ git push origin main
 curl -fsSLo /tmp/swvault-install.sh https://raw.githubusercontent.com/silverace71/solidworks-vault/main/install.sh && sudo bash /tmp/swvault-install.sh
 ```
 
-See `docs/ONE-LINE-NEW-VM-INSTALL.md` for prerequisites, Cloudflare, R2, SMTP, local-folder/remote-VM import, preflight and recovery.
+See `docs/ONE-LINE-NEW-VM-INSTALL.md` for prerequisites, Cloudflare, R2, SMTP, optional backups, automatic backup/import-folder creation, local-folder/remote-VM import, and recovery.
+
+### New installer options
+
+- **Nightly backups are optional.** Choose `no` to disable the backup timer and avoid needing a backup directory. Choosing `yes` allows the wizard to create a missing **folder** on an already-mounted independent backup disk. Existing backup archives are never deleted.
+- **Resume or restart:** when prior state exists, choose `resume`, `restart`, or `quit`. Resume keeps the approved source commit and settings; restart re-asks the questionnaire without wiping the vault data, retaining source history and taking a private config checkpoint before rewriting `.env`.
+- **Import staging is separate from scheduled backups.** Full historical 1.2.9 imports require independent one-time rollback space even when nightly backups are disabled; ordinary CAD folder staging can live on another directory with sufficient space.
+- `--dry-run` never deploys, including when saved wizard state exists.
 
 ## One-line OLD VM export (optional; freeze only when ready)
 

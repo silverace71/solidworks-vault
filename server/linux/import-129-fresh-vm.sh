@@ -5,14 +5,14 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 [[ $EUID == 0 ]] || die 'Use sudo on the NEW SWVAULT 1.4 VM.'
 [[ -r /dev/tty ]] || die 'Interactive terminal required.'
-[[ $# == 2 && "$1" == /* && "$2" == /* ]] || die 'Usage: sudo ./import-129-fresh-vm.sh /path/old-129-final.tar.gz /separate-disk/backup-dir'
+[[ $# == 2 && "$1" == /* && "$2" == /* ]] || die 'Usage: sudo ./import-129-fresh-vm.sh /path/old-129-final.tar.gz /separate-disk/import-safety-dir (required even if nightly backups are disabled)'
 archive="$1"; backup="$2"
 [[ -s "$archive" ]] || die 'Missing 1.2.9 export archive.'
 [[ "$(env_get CF_DEPLOYMENT)" == cloudflare ]] || die 'Complete the fresh 1.4 setup.sh first.'
 [[ ! -f "$DATA_DIR/r2-transfer/migration-ready.json" ]] || die 'Cutover is already armed. Refusing import.'
 [[ -d "$DATA_DIR/gitea" ]] || die 'New VM Gitea data missing.'
 mkdir -p "$backup"
-[[ "$(df -P "$backup" | tail -1 | awk '{print $1}')" != "$(df -P "$DATA_DIR" | tail -1 | awk '{print $1}')" ]] || die 'Backup must be an independent disk.'
+[[ "$(df -P "$backup" | tail -1 | awk '{print $1}')" != "$(df -P "$DATA_DIR" | tail -1 | awk '{print $1}')" ]] || die 'Full-history import rollback/staging must be on an independent disk even when nightly backups are disabled.'
 [[ "$archive" != "$SWVAULT_DIR"/* ]] || die 'Export archive must be outside deployment directory.'
 umask 077
 # Never extract a 100+GB archive in /tmp; use the independent backup filesystem.
@@ -34,7 +34,12 @@ cleanup() {
   if (( rc != 0 )) && [[ "$services_stopped" == yes && "$import_changes_started" == no ]]; then
     compose up -d --build --remove-orphans >/dev/null 2>&1 || true
   fi
-  systemctl enable --now swvault-watchdog.timer swvault-backup.timer >/dev/null 2>&1 || true
+  systemctl enable --now swvault-watchdog.timer >/dev/null 2>&1 || true
+  if [[ "$(env_get BACKUPS_ENABLED)" != no ]]; then
+    systemctl enable --now swvault-backup.timer >/dev/null 2>&1 || true
+  else
+    systemctl disable --now swvault-backup.timer >/dev/null 2>&1 || true
+  fi
   rm -rf "$stage"
   exit "$rc"
 }

@@ -62,7 +62,15 @@ REPO="$(ask_value REPO 'Vault repository' "$(env_get REPO || true)")"; REPO="${R
 ADMIN_USER="$(ask_value ADMIN_USER 'Admin username' "$(env_get ADMIN_USER || true)")"; ADMIN_USER="${ADMIN_USER:-${SUDO_USER:-admin}}"
 LOCAL_ROOT="$(ask_value LOCAL_ROOT 'Default Windows workspace path' "$(env_get LOCAL_ROOT || true)")"; LOCAL_ROOT="${LOCAL_ROOT:-C:\\SWVault\\${TEAM_NAME}}"
 SW_VERSION="$(ask_value SW_VERSION 'SOLIDWORKS year (empty disables check)' "$(env_get SW_VERSION || true)")"
-BACKUP_DIR="$(ask_value BACKUP_DIR 'Separate-disk backup destination' "$(env_get BACKUP_DIR || true)")"; BACKUP_DIR="${BACKUP_DIR:-/var/backups/swvault}"
+BACKUPS_ENABLED="$(ask_value BACKUPS_ENABLED 'Enable scheduled backups? (yes/no)' "$(env_get BACKUPS_ENABLED)")"
+BACKUPS_ENABLED="${BACKUPS_ENABLED:-yes}"
+[[ "$BACKUPS_ENABLED" == yes || "$BACKUPS_ENABLED" == no ]] || die 'BACKUPS_ENABLED must be yes or no'
+if [[ "$BACKUPS_ENABLED" == yes ]]; then
+    BACKUP_DIR="$(ask_value BACKUP_DIR 'Independent backup destination' "$(env_get BACKUP_DIR || true)")"
+    BACKUP_DIR="${BACKUP_DIR:-/var/backups/swvault}"
+else
+    BACKUP_DIR=''
+fi
 EMAIL_DOMAINS="$(ask_value EMAIL_DOMAINS 'Allowed member email domains (none disables verification)' "$(env_get EMAIL_DOMAINS || true)")"; EMAIL_DOMAINS="${EMAIL_DOMAINS:-none}"
 CF_DOMAIN="$(ask_value CF_DOMAIN 'Cloudflare domain' "$(env_get CF_DOMAIN || true)")"; CF_DOMAIN="${CF_DOMAIN:-lynxmotorsports.racing}"
 VAULT_HOSTNAME="$(ask_value VAULT_HOSTNAME 'Public SWVAULT hostname (MUST already be routed in Cloudflare)' "$(env_get CF_PUBLIC_HOST || true)")"
@@ -78,8 +86,10 @@ valid_host "$VAULT_HOSTNAME" || die "Invalid public hostname"
 [[ "$R2_ACCOUNT_ID" =~ ^[0-9a-fA-F]{32}$ ]] || die "R2 Account ID must have 32 hexadecimal characters"
 [[ "$R2_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || die "Invalid R2 bucket name"
 [[ -z "$SW_VERSION" || "$SW_VERSION" =~ ^20[0-9]{2}$ ]] || die "SOLIDWORKS year must be 20XX or empty"
-[[ "$BACKUP_DIR" == /* ]] || die "Backup directory must be absolute"
-[[ "$BACKUP_DIR" != "$SWVAULT_DIR"* && "$BACKUP_DIR" != "$DATA_DIR"* ]] || die "Backup directory must be outside SWVAULT"
+if [[ "$BACKUPS_ENABLED" == yes ]]; then
+    [[ "$BACKUP_DIR" == /* ]] || die 'Backup directory must be absolute'
+    [[ "$BACKUP_DIR" != "$SWVAULT_DIR" && "$BACKUP_DIR" != "$SWVAULT_DIR"/* ]] || die 'Backup directory must be outside SWVAULT'
+fi
 
 if [[ -n "$(env_get CF_TUNNEL_TOKEN)" ]]; then
     if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then reuse=y
@@ -110,7 +120,14 @@ for val in "$CF_TUNNEL_TOKEN" "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY"; do
 done
 
 SMTP_HOST="$(env_get SMTP_HOST)"; SMTP_PORT="$(env_get SMTP_PORT)"; SMTP_USER="$(env_get SMTP_USER)"; SMTP_PASSWORD="$(env_get SMTP_PASSWORD)"; SMTP_FROM="$(env_get SMTP_FROM)"
-if [[ "$EMAIL_DOMAINS" != none && -z "$SMTP_HOST" ]]; then
+if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
+    [[ "$(env_get SMTP_ENABLED)" == yes || "$(env_get SMTP_ENABLED)" == no ]] || die 'Wizard SMTP_ENABLED must be yes or no'
+    if [[ "$(env_get SMTP_ENABLED)" == no ]]; then
+        SMTP_HOST=''; SMTP_PORT=''; SMTP_USER=''; SMTP_PASSWORD=''; SMTP_FROM=''
+        [[ "$EMAIL_DOMAINS" == none ]] || die 'SMTP is disabled but allowed-email-domain verification is enabled; restart setup to enable SMTP or set email domains to none.'
+    fi
+fi
+if [[ "${SWVAULT_WIZARD:-no}" != yes && "$EMAIL_DOMAINS" != none && -z "$SMTP_HOST" ]]; then
     echo 'For verification emails, use a dedicated Gmail app password (NOT your account password).'
     SMTP_HOST="$(ask_value SMTP_HOST 'SMTP host' smtp.gmail.com)"
     SMTP_PORT="$(ask_value SMTP_PORT 'SMTP port' 587)"
@@ -139,7 +156,7 @@ if [[ "$existing" == yes ]]; then
 fi
 printf '\nREVIEW (no changes have been made yet)\n'
 printf '  Public URL: https://%s\n  Gitea: %s/%s\n  R2: %s (private, signed direct downloads)\n' "$VAULT_HOSTNAME" "$ORG" "$REPO" "$R2_BUCKET"
-printf '  Backups: %s\n  Existing SWVAULT data: %s (Tailscale legacy: %s)\n' "$BACKUP_DIR" "$existing" "$legacy"
+printf '  Scheduled backups: %s (%s)\n  Existing SWVAULT data: %s (Tailscale legacy: %s)\n' "$BACKUPS_ENABLED" "${BACKUP_DIR:-disabled}" "$existing" "$legacy"
 printf '  Cloudflare Free: direct R2 multipart uploads and signed downloads bypass the 100 MB tunnel limit for 1.4 clients; unmodified clients do not.\n'
 if [[ "$legacy" == yes ]]; then
     printf '  WARNING: production clients use a hostname-derived vault ID. Existing clients need a migration/re-enrollment plan.\n'
@@ -229,7 +246,12 @@ cleanup_and_rollback() {
         docker compose -f "$SWVAULT_DIR/docker-compose.tailscale-legacy.yml" up -d --remove-orphans || true
     fi
     if (( code != 0 )) && [[ "$timers_paused" == yes ]]; then
-        systemctl enable --now swvault-backup.timer swvault-watchdog.timer >/dev/null 2>&1 || true
+        systemctl enable --now swvault-watchdog.timer >/dev/null 2>&1 || true
+        if [[ "$BACKUPS_ENABLED" == yes ]]; then
+            systemctl enable --now swvault-backup.timer >/dev/null 2>&1 || true
+        else
+            systemctl disable --now swvault-backup.timer >/dev/null 2>&1 || true
+        fi
     fi
     exit "$code"
 }
@@ -242,19 +264,23 @@ if [[ "$existing" == yes ]]; then
     systemctl stop swvault-watchdog.timer swvault-backup.timer swvault-watchdog.service swvault-backup.service >/dev/null 2>&1 || true
     systemctl stop swvault-autoupdate.timer swvault-autoupdate.path swvault-autoupdate.service >/dev/null 2>&1 || true
     timers_paused=yes
-    say 'Backing up current server before touching existing containers'
-    mkdir -p "$BACKUP_DIR"
-    rollback_path="$BACKUP_DIR/cloudflare-rollback-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$rollback_path"
-    [[ -f "$ENV_FILE" ]] && cp -p "$ENV_FILE" "$rollback_path/old.env" || die 'Existing install is missing .env'
-    [[ ! -f "$TEAM_FILE" ]] || cp -p "$TEAM_FILE" "$rollback_path/old.team.json"
-    if [[ "$legacy" == yes ]]; then
-        COMPOSE_FILE="$SWVAULT_DIR/docker-compose.tailscale-legacy.yml" "$SWVAULT_DIR/../backup/backup-gitea.sh" "$SWVAULT_DIR" "$BACKUP_DIR"
+    if [[ "$BACKUPS_ENABLED" == yes ]]; then
+        say 'Backing up current server before changing existing containers'
+        mkdir -p "$BACKUP_DIR"
+        rollback_path="$BACKUP_DIR/cloudflare-rollback-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$rollback_path"
+        [[ -f "$ENV_FILE" ]] && cp -p "$ENV_FILE" "$rollback_path/old.env" || die 'Existing install is missing .env'
+        [[ ! -f "$TEAM_FILE" ]] || cp -p "$TEAM_FILE" "$rollback_path/old.team.json"
+        if [[ "$legacy" == yes ]]; then
+            COMPOSE_FILE="$SWVAULT_DIR/docker-compose.tailscale-legacy.yml" "$SWVAULT_DIR/../backup/backup-gitea.sh" "$SWVAULT_DIR" "$BACKUP_DIR"
+        else
+            "$SWVAULT_DIR/../backup/backup-gitea.sh" "$SWVAULT_DIR" "$BACKUP_DIR"
+        fi
+        [[ -n "$(find "$BACKUP_DIR/daily" -maxdepth 1 -name 'gitea-*.tar.gz' -size +0c -print -quit)" ]] || die 'No verified Gitea dump; aborting'
+        say "Snapshot complete; rollback settings at $rollback_path"
     else
-        "$SWVAULT_DIR/../backup/backup-gitea.sh" "$SWVAULT_DIR" "$BACKUP_DIR"
+        warn 'Scheduled backups are OFF; no automated full-server snapshot will be created on this rerun.'
     fi
-    [[ -n "$(find "$BACKUP_DIR/daily" -maxdepth 1 -name 'gitea-*.tar.gz' -size +0c -print -quit)" ]] || die 'No verified Gitea dump; aborting'
-    say "Legacy backup complete; rollback settings at $rollback_path"
     if [[ "$legacy" == yes ]]; then
     # An old auto-updater might replace Cloudflare files with a Tailscale-only release.
     systemctl disable --now swvault-autoupdate.timer swvault-autoupdate.path >/dev/null 2>&1 || true
@@ -276,7 +302,7 @@ fi
 
 # 3. Write settings and start the Cloudflare-first server.
 say 'Writing root-only configuration and Tunnel token'
-for kv in TEAM_NAME ORG REPO ADMIN_USER LOCAL_ROOT SW_VERSION BACKUP_DIR EMAIL_DOMAINS CF_DOMAIN VAULT_HOSTNAME R2_BUCKET R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY CF_TUNNEL_TOKEN; do
+for kv in TEAM_NAME ORG REPO ADMIN_USER LOCAL_ROOT SW_VERSION BACKUP_DIR BACKUPS_ENABLED EMAIL_DOMAINS CF_DOMAIN VAULT_HOSTNAME R2_BUCKET R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY CF_TUNNEL_TOKEN; do
     env_set "$kv" "${!kv}"
 done
 env_set CF_PUBLIC_HOST "$VAULT_HOSTNAME"
@@ -284,6 +310,8 @@ env_set CF_DEPLOYMENT cloudflare
 if [[ -n "$SMTP_HOST" ]]; then
     for kv in SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM; do env_set "$kv" "${!kv}"; done
     env_set SMTP_PASSWORD "${SMTP_PASSWORD//\$/\$\$}"
+else
+    for kv in SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD; do env_set "$kv" ''; done
 fi
 for key in GITEA_SECRET_KEY GITEA_INTERNAL_TOKEN GITEA_LFS_JWT_SECRET GITEA_OAUTH_JWT_SECRET; do
     [[ -n "$(env_get "$key")" ]] || env_set "$key" "$(random_secret)"
@@ -387,11 +415,12 @@ fi
 
 
 # ------------------------------------------------------------------ 5. keep it running
-say "Scheduling nightly backups and a health watchdog"
-mkdir -p "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
+say 'Configuring the watchdog and optional nightly backup schedule'
 backup_script="$(cd "$SWVAULT_DIR/../backup" && pwd)/backup-gitea.sh"
 chmod +x "$backup_script" "$SWVAULT_DIR/swvault-admin.sh" "$SWVAULT_DIR/setup.sh"
+if [[ "$BACKUPS_ENABLED" == yes ]]; then
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
 cat > /etc/systemd/system/swvault-backup.service <<EOF
 [Unit]
 Description=SwVault nightly backup
@@ -413,6 +442,11 @@ RandomizedDelaySec=10m
 [Install]
 WantedBy=timers.target
 EOF
+else
+    # Never remove existing backup files, but disable scheduled jobs if opted out.
+    systemctl disable --now swvault-backup.timer >/dev/null 2>&1 || true
+    say 'Nightly backups disabled (existing archives, if any, remain untouched)'
+fi
 cat > /etc/systemd/system/swvault-watchdog.service <<EOF
 [Unit]
 Description=SwVault health watchdog (restarts the server if it stops answering)
@@ -434,7 +468,12 @@ OnUnitActiveSec=5min
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now swvault-backup.timer swvault-watchdog.timer >/dev/null
+if [[ "$BACKUPS_ENABLED" == yes ]]; then
+    systemctl enable --now swvault-backup.timer >/dev/null
+else
+    systemctl disable --now swvault-backup.timer >/dev/null 2>&1 || true
+fi
+systemctl enable --now swvault-watchdog.timer >/dev/null
 
 if [[ "$(env_get KEEP_AWAKE)" != no ]]; then
     if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
