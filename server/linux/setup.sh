@@ -11,11 +11,28 @@ umask 077
 
 ask_value() {
     local key="$1" text="$2" default="$3" answer
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
+        answer="$(env_get "$key")"
+        [[ -n "$answer" || "$key" == SW_VERSION ]] || die "Wizard value $key is missing; rerun install.sh"
+        printf '%s' "$answer"
+        return
+    fi
     read -r -p "$text [$default]: " answer </dev/tty
     printf '%s' "${answer:-$default}"
 }
 ask_secret() {
     local text="$1" answer
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
+        case "$text" in
+            Cloudflare*) answer="$(env_get CF_TUNNEL_TOKEN)" ;;
+            'R2 Access Key ID'*) answer="$(env_get R2_ACCESS_KEY_ID)" ;;
+            'R2 Secret Access Key'*) answer="$(env_get R2_SECRET_ACCESS_KEY)" ;;
+            *) die "Unknown wizard secret request: $text" ;;
+        esac
+        [[ -n "$answer" ]] || die "Wizard secret missing: $text"
+        printf '%s' "$answer"
+        return
+    fi
     read -r -s -p "$text: " answer </dev/tty; echo >&2
     printf '%s' "$answer"
 }
@@ -65,14 +82,16 @@ valid_host "$VAULT_HOSTNAME" || die "Invalid public hostname"
 [[ "$BACKUP_DIR" != "$SWVAULT_DIR"* && "$BACKUP_DIR" != "$DATA_DIR"* ]] || die "Backup directory must be outside SWVAULT"
 
 if [[ -n "$(env_get CF_TUNNEL_TOKEN)" ]]; then
-    read -r -p 'Reuse saved Cloudflare Tunnel token? [Y/n]: ' reuse </dev/tty
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then reuse=y
+    else read -r -p 'Reuse saved Cloudflare Tunnel token? [Y/n]: ' reuse </dev/tty; fi
     [[ "${reuse:-y}" =~ ^[Yy] ]] && CF_TUNNEL_TOKEN="$(env_get CF_TUNNEL_TOKEN)" || CF_TUNNEL_TOKEN="$(ask_secret 'Cloudflare Tunnel token (eyJ...)')"
 else
     CF_TUNNEL_TOKEN="$(ask_secret 'Cloudflare Tunnel token (eyJ...)')"
 fi
 [[ "$CF_TUNNEL_TOKEN" == eyJ* ]] || die 'The Tunnel token must start with eyJ (paste the token, not the whole docker command)'
 if [[ -n "$(env_get R2_ACCESS_KEY_ID)" && -n "$(env_get R2_SECRET_ACCESS_KEY)" ]]; then
-    read -r -p 'Reuse saved R2 access and secret keys? [Y/n]: ' reuse </dev/tty
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then reuse=y
+    else read -r -p 'Reuse saved R2 access and secret keys? [Y/n]: ' reuse </dev/tty; fi
     if [[ "${reuse:-y}" =~ ^[Yy] ]]; then
         R2_ACCESS_KEY_ID="$(env_get R2_ACCESS_KEY_ID)"
         R2_SECRET_ACCESS_KEY="$(env_get R2_SECRET_ACCESS_KEY)"
@@ -102,6 +121,11 @@ fi
 
 existing=no; legacy=no
 if [[ -d "$DATA_DIR/tailscale" || -s "$ADMIN_TOKEN_FILE" || -f "$DATA_DIR/gitea/gitea/conf/app.ini" ]]; then existing=yes; fi
+# Fresh wizard setup may be interrupted after containers initialize Gitea but
+# before an admin token is written. That state is resumable, not legacy data.
+if [[ "${SWVAULT_WIZARD:-no}" == yes && "$(env_get SWVAULT_SETUP_STAGE)" == in_progress && ! -s "$ADMIN_TOKEN_FILE" ]]; then
+    existing=no
+fi
 if [[ "$existing" == yes && "$(env_get CF_DEPLOYMENT)" != cloudflare ]]; then legacy=yes; fi
 if [[ "$legacy" == yes ]]; then
     die "This release REQUIRES a new VM for the one-time 1.2.9 -> 1.4 move. Do not run setup on the old production VM; see docs/1.2.9-TO-1.4-MIGRATION.md."
@@ -123,15 +147,27 @@ if [[ "$legacy" == yes ]]; then
     read -r -p 'Type MIGRATE to allow backup, R2 copying, and hostname cutover: ' approval </dev/tty
     [[ "$approval" == MIGRATE ]] || die 'No changes were made.'
 elif [[ "$existing" == yes ]]; then
-    read -r -p 'Type RECONFIGURE to update your existing Cloudflare SWVAULT configuration: ' approval </dev/tty
-    [[ "$approval" == RECONFIGURE ]] || die 'No changes were made.'
+    if [[ "${SWVAULT_WIZARD:-no}" == yes && "${SWVAULT_WIZARD_APPROVED:-no}" == yes ]]; then
+        approval=RECONFIGURE
+    else
+        read -r -p 'Type RECONFIGURE to update your existing Cloudflare SWVAULT configuration: ' approval </dev/tty
+    fi
+    [[ "$approval" == RECONFIGURE ]] || die 'No changes were made.' 
 else
-    read -r -p 'Type INSTALL to deploy a NEW SWVAULT server: ' approval </dev/tty
-    [[ "$approval" == INSTALL ]] || die 'No changes were made.'
+    if [[ "${SWVAULT_WIZARD:-no}" == yes && "${SWVAULT_WIZARD_APPROVED:-no}" == yes ]]; then
+        approval=INSTALL
+    else
+        read -r -p 'Type INSTALL to deploy a NEW SWVAULT server: ' approval </dev/tty
+    fi
+    [[ "$approval" == INSTALL ]] || die 'No changes were made.' 
 fi
 # Only new 1.4 clients bypass the Cloudflare 100 MB limit using direct R2.
 printf '1.4 supports signed R2 multipart uploads for large CAD files; pilot testing is required.\n'
-read -r -p 'Type I_ACCEPT_PILOT_TESTING to continue: ' upload_ack </dev/tty
+if [[ "${SWVAULT_WIZARD:-no}" == yes && "${SWVAULT_WIZARD_APPROVED:-no}" == yes ]]; then
+    upload_ack=I_ACCEPT_PILOT_TESTING
+else
+    read -r -p 'Type I_ACCEPT_PILOT_TESTING to continue: ' upload_ack </dev/tty
+fi
 [[ "$upload_ack" == I_ACCEPT_PILOT_TESTING ]] || die 'Cancelled: a real pilot test is required.'
 
 # 2. Preflight: no existing data modification before credential verification.
@@ -140,9 +176,25 @@ missing=()
 for tool in curl jq rsync rclone sqlite3; do command -v "$tool" >/dev/null || missing+=("$tool"); done
 ((${#missing[@]} == 0)) || install_packages "${missing[@]}"
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
-    say 'Installing Docker using Docker convenience script'
-    curl -fsSL https://get.docker.com | sh
+    say 'Installing Docker Engine and Compose from the official package repository (no curl|sh)'
+    if ! command -v apt-get >/dev/null; then
+        die 'Docker Engine with Compose plugin must be installed manually on this distribution; see https://docs.docker.com/engine/install/'
+    fi
+    . /etc/os-release
+    case "$ID" in ubuntu|debian) ;; *) die 'Official automated Docker installation supports Ubuntu/Debian only.' ;; esac
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    dpkg_arch="$(dpkg --print-architecture)"
+    release="${VERSION_CODENAME:-}"
+    [[ -n "$release" ]] || die 'Cannot determine distribution codename for Docker apt repository.'
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' "$dpkg_arch" "$ID" "$release" > /etc/apt/sources.list.d/docker-swvault.list
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
+command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || die 'Docker installation did not provide docker compose.' 
 systemctl enable --now docker >/dev/null
 rclone_conf_temp="$(mktemp)"
 chmod 600 "$rclone_conf_temp"
@@ -322,8 +374,12 @@ if [[ "$existing" == yes ]]; then
     fi
 fi
 
-if [[ "$(env_get EMAIL_DOMAINS)" != none && -n "$(env_get SMTP_HOST)" && -z "$(env_get EMAIL_TESTED)" ]]; then
-    read -r -p "Send a test email to check the email settings? Address (Enter to skip): " test_to </dev/tty
+if [[ -n "$(env_get SMTP_HOST)" && -z "$(env_get EMAIL_TESTED)" ]]; then
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
+        test_to="${SWVAULT_WIZARD_EMAIL_TEST:-}"
+    else
+        read -r -p "Send a test email to check the email settings? Address (Enter to skip): " test_to </dev/tty
+    fi
     if [[ -n "$test_to" ]]; then
         if "$SWVAULT_DIR/swvault-admin.sh" test-email "$test_to"; then env_set EMAIL_TESTED yes; fi
     fi
@@ -381,7 +437,11 @@ systemctl daemon-reload
 systemctl enable --now swvault-backup.timer swvault-watchdog.timer >/dev/null
 
 if [[ "$(env_get KEEP_AWAKE)" != no ]]; then
-    read -r -p "Stop this PC from sleeping/suspending (recommended for a server)? [Y/n]: " awake </dev/tty
+    if [[ "${SWVAULT_WIZARD:-no}" == yes ]]; then
+        awake=y
+    else
+        read -r -p "Stop this PC from sleeping/suspending (recommended for a server)? [Y/n]: " awake </dev/tty
+    fi
     if [[ "${awake:-y}" =~ ^[Yy] ]]; then
         systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
         if [[ -f /etc/systemd/logind.conf ]] && ! grep -q '^HandleLidSwitch=ignore' /etc/systemd/logind.conf; then
