@@ -655,7 +655,10 @@ def _direct_r2_action(session, oid, size, filename):
     # Content-Disposition response override, while keeping the download in R2.
     bucket = os.getenv('R2_BUCKET', '').strip()
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', bucket):
-        raise T.ApiError(HTTPStatus.SERVICE_UNAVAILABLE, 'R2 bucket is not configured for browser downloads.')
+        # Gitea has already authorized this signed R2 URL. Do not break file
+        # downloads just because the optional filename override is unavailable.
+        T.log('web browser: named R2 download skipped (bucket config); using authenticated R2 URL')
+        return url
     # Gitea uses S3 path addressing: /bucket/lfs/.../<sha256>. Validate the
     # canonical prefix and SHA before asking the coordinator to sign anything.
     key_prefix = '/' + bucket + '/lfs/'
@@ -685,8 +688,15 @@ def _direct_r2_action(session, oid, size, filename):
             r2_target.port not in (None, 443) or not r2_target.query):
             raise ValueError('Unexpected R2 sign result')
         return destination
-    except (OSError, ValueError, KeyError, urllib.error.URLError):
-        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Could not create a named R2 download. Contact the vault administrator.')
+    except (OSError, ValueError, KeyError, urllib.error.URLError) as error:
+        # The Gitea action above has already verified the signed private R2
+        # destination and authenticated user. The filename is optional; a
+        # broken internal signer must not turn a valid download into HTTP 502.
+        # Never log exception text: an HTTPError may contain a signed URL.
+        reason = (f'HTTP {error.code}' if isinstance(error, urllib.error.HTTPError)
+                  else type(error).__name__)
+        T.log(f'web browser: named R2 signing failed ({reason}); using authenticated R2 URL')
+        return url
 
 
 def _stored_blob_preview(path, ref, auth):

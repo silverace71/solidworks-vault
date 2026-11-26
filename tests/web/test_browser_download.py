@@ -62,6 +62,30 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaises(ApiError):
                 m._direct_r2_action(self.session, oid, 100, "test.SLDASM")
 
+    def test_named_signer_failure_keeps_authorized_direct_r2_download(self):
+        import tempfile
+        oid = 'a' * 64
+        host = 'b' * 32 + '.r2.cloudflarestorage.com'
+        gitea_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=already-authorized'
+        batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': gitea_url}}}]}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'admin-token'; path.write_text('secret')
+            with patch.dict(m.os.environ, {'R2_ACCOUNT_ID': 'b' * 32,
+                         'R2_BUCKET': 'private-bucket', 'ADMIN_TOKEN_FILE': str(path)}), \
+                 patch.object(m, '_lfs', return_value=(200, batch)), \
+                 patch.object(m.urllib.request, 'urlopen', side_effect=OSError('signer unavailable')):
+                result = m._direct_r2_action(self.session, oid, 1315, 'Steering.SLDASM')
+        self.assertEqual(result, gitea_url)
+
+    def test_untrusted_r2_url_never_falls_back(self):
+        oid = 'a' * 64
+        gitea_url = 'https://another.example.com/file?signature=bad'
+        batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': gitea_url}}}]}
+        with patch.dict(m.os.environ, {'R2_ACCOUNT_ID': 'b' * 32}):
+            with patch.object(m, '_lfs', return_value=(200, batch)):
+                with self.assertRaises(ApiError):
+                    m._direct_r2_action(self.session, oid, 1315, 'Steering.SLDASM')
+
     def test_browser_signer_preserves_filename_without_proxying_file_bytes(self):
         from unittest.mock import MagicMock
         import tempfile
