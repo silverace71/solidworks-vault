@@ -40,3 +40,6 @@ server/linux/backup/
 server/linux/*-private*.tar.gz
 server/linux/invites/installer/
 *.tar.gz.sha256
+
+# Non-secret CI placeholder only
+!server/linux/.env.ci

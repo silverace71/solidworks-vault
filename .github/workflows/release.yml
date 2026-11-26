@@ -70,6 +70,7 @@ jobs:
           python3 -m py_compile server/linux/invites/*.py server/linux/r2-transfer/service.py
           python3 -m pip install 'boto3==1.40.74' 'requests==2.32.5'
           python3 -m unittest discover -s tests/r2-transfer -p 'test_*.py' -v
+          python3 -m unittest discover -s tests/web -p 'test_*.py' -v
           git archive --format=tar.gz -o swvault-server.tar.gz HEAD server
       - uses: actions/upload-artifact@v4
         if: steps.plan.outputs.release == 'true'

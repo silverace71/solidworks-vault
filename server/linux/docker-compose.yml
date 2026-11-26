@@ -75,6 +75,7 @@ services:
       TEAM_NAME: ${TEAM_NAME:-Team}
       REPO: ${REPO:-cad}
       GITEA_URL: http://127.0.0.1:3000
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?Set R2_ACCOUNT_ID}
       ADMIN_TOKEN_FILE: /run/swvault/admin-token
       STATE_DIR: /data
       EMAIL_DOMAINS: ${EMAIL_DOMAINS:-none}

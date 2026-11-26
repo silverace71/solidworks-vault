@@ -215,7 +215,7 @@ cmd_status() {
     fi
     say "LFS storage"
     echo "  R2 bucket: $(env_get R2_BUCKET) (signed direct downloads enabled)"
-    if curl -fsS -m 5 http://127.0.0.1:3200/swvault-transfer/health >/dev/null 2>&1; then
+    if curl -fsS -m 5 http://127.0.0.1:8080/swvault-transfer/health >/dev/null 2>&1; then
         echo '  Direct multipart coordinator: healthy'
     else
         echo '  Direct multipart coordinator: NOT answering'; ok=no
@@ -267,7 +267,7 @@ cmd_watchdog() {
         echo "Team service not answering; restarting it."
         compose restart invites
     fi
-    if ! curl -fsS -m 10 http://127.0.0.1:3200/swvault-transfer/health >/dev/null 2>&1; then
+    if ! curl -fsS -m 10 http://127.0.0.1:8080/swvault-transfer/health >/dev/null 2>&1; then
         echo 'R2 multipart coordinator not responding; restarting it.'
         compose restart r2-transfer
     fi

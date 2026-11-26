@@ -1,0 +1,21 @@
+Selective production readiness patch for SWVAULT 1.4.
+Review each file in git diff before deploying. This is not a clean-room security audit.
+
+.github/workflows/ci.yml
+.github/workflows/release.yml
+.gitignore
+docs/PRODUCTION-ROLL-OUT-1.2.9-TO-1.4.md
+scripts/windows-build-and-publish.ps1
+server/linux/.env.ci
+server/linux/Caddyfile.cloudflare
+server/linux/cold-mirror-r2.sh
+server/linux/docker-compose.yml
+server/linux/enable-cold-mirror-timer.sh
+server/linux/invites/browser.py
+server/linux/production-readiness.sh
+server/linux/r2-transfer/Dockerfile
+server/linux/swvault-admin.sh
+src/SwVault.Agent/AgentHost.cs
+src/SwVault.Core/Lfs/DirectR2MultipartClient.cs
+src/SwVault.Core/Lfs/LfsClient.cs
+tests/web/test_browser_download.py

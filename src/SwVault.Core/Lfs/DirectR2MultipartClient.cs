@@ -17,6 +17,8 @@ namespace SwVault.Core.Lfs;
 internal sealed class DirectR2MultipartClient
 {
     private const int MaxParallelParts = 4;
+    // Aggregate limit across concurrent multipart check-ins in one Windows Agent: 5 Mbps.
+    private static readonly UploadRateGate UploadLimiter = new(625_000);
     private static readonly TimeSpan FinalizeTimeout = TimeSpan.FromHours(3);
     private readonly HttpClient _control;
     private static readonly HttpClient SharedDirect = new(new HttpClientHandler { AllowAutoRedirect = false })
@@ -74,7 +76,7 @@ internal sealed class DirectR2MultipartClient
                             throw new IOException("Untrusted R2 multipart upload target.");
                         using var request = new HttpRequestMessage(HttpMethod.Put, r2Url)
                         {
-                            Content = new FilePartContent(item.FilePath, offset, length),
+                            Content = new FilePartContent(item.FilePath, offset, length, UploadLimiter),
                         };
                         using var response = await _direct.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                         if (!response.IsSuccessStatusCode)
@@ -139,12 +141,14 @@ internal sealed class DirectR2MultipartClient
         private readonly string _path;
         private readonly long _offset;
         private readonly int _length;
+        private readonly UploadRateGate _gate;
 
-        public FilePartContent(string path, long offset, int length)
+        public FilePartContent(string path, long offset, int length, UploadRateGate gate)
         {
             _path = path;
             _offset = offset;
             _length = length;
+            _gate = gate;
             Headers.ContentLength = length;
         }
 
@@ -157,11 +161,12 @@ internal sealed class DirectR2MultipartClient
                 FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, useAsync: true);
             file.Seek(_offset, SeekOrigin.Begin);
             var remaining = _length;
-            var buf = new byte[1024 * 1024];
+            var buf = new byte[64 * 1024];
             while (remaining > 0)
             {
                 var read = await file.ReadAsync(buf.AsMemory(0, Math.Min(buf.Length, remaining)), ct).ConfigureAwait(false);
                 if (read == 0) throw new EndOfStreamException("CAD file was truncated during multipart check-in.");
+                await _gate.ReserveAsync(read, ct).ConfigureAwait(false);
                 await stream.WriteAsync(buf.AsMemory(0, read), ct).ConfigureAwait(false);
                 remaining -= read;
             }
@@ -171,6 +176,42 @@ internal sealed class DirectR2MultipartClient
         {
             length = _length;
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Approximate byte-rate scheduler for the total direct R2 upload traffic of this process.
+    /// It reserves small 64 KiB slots so parallel part uploads cannot each exceed the cap.
+    /// This is not a site-wide aggregate limit across separate PCs.
+    /// </summary>
+    private sealed class UploadRateGate
+    {
+        private readonly double _bytesPerSecond;
+        private readonly SemaphoreSlim _mutex = new(1, 1);
+        private double _nextTime;
+
+        public UploadRateGate(double bytesPerSecond)
+        {
+            _bytesPerSecond = bytesPerSecond;
+        }
+
+        public async Task ReserveAsync(int bytes, CancellationToken ct)
+        {
+            await _mutex.WaitAsync(ct).ConfigureAwait(false);
+            double delay;
+            try
+            {
+                double now = System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
+                double start = Math.Max(now, _nextTime);
+                _nextTime = start + bytes / _bytesPerSecond;
+                delay = Math.Max(0, start - now);
+            }
+            finally
+            {
+                _mutex.Release();
+            }
+            if (delay > 0)
+                await Task.Delay(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
         }
     }
 }
