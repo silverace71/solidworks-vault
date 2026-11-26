@@ -60,4 +60,33 @@ class DownloadTests(unittest.TestCase):
         batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': wrong_url}}}]}
         with patch.dict(m.os.environ, {'R2_ACCOUNT_ID': 'b' * 32}), patch.object(m, '_lfs', return_value=(200, batch)):
             with self.assertRaises(ApiError):
-                m._direct_r2_action(self.session, oid, 100)
+                m._direct_r2_action(self.session, oid, 100, "test.SLDASM")
+
+    def test_browser_signer_preserves_filename_without_proxying_file_bytes(self):
+        from unittest.mock import MagicMock
+        import tempfile
+        oid = 'a' * 64
+        host = 'b' * 32 + '.r2.cloudflarestorage.com'
+        gitea_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=old'
+        final_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=new'
+        batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': gitea_url}}}]}
+        payloads = []
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def read(self): return json.dumps({'url': final_url}).encode()
+        def fake_open(req, timeout):
+            payloads.append(json.loads(req.data))
+            self.assertEqual('http://127.0.0.1:3200/internal/browser-download', req.full_url)
+            self.assertEqual('secret', req.get_header('X-swvault-internal-token'))
+            return FakeResponse()
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'admin-token'; path.write_text('secret')
+            with patch.dict(m.os.environ, {'R2_ACCOUNT_ID':'b'*32, 'R2_BUCKET':'private-bucket', 'ADMIN_TOKEN_FILE':str(path)}), \
+                 patch.object(m, '_lfs', return_value=(200, batch)), \
+                 patch.object(m.urllib.request, 'urlopen', side_effect=fake_open):
+                result = m._direct_r2_action(self.session, oid, 1315, 'Brakes and Pedals.SLDASM')
+        self.assertEqual(final_url, result)
+        self.assertEqual('Brakes and Pedals.SLDASM', payloads[0]['filename'])
+        self.assertEqual(oid, payloads[0]['oid'])

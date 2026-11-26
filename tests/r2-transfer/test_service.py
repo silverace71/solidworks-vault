@@ -141,6 +141,21 @@ class TransferTests(unittest.TestCase):
             register.assert_not_called()
         self.assertFalse(m.cold_path(oid).exists())
 
+    def test_named_r2_download_is_signed_with_content_disposition(self):
+        from unittest.mock import MagicMock
+        oid = 'a' * 64
+        s3 = MagicMock()
+        s3.generate_presigned_url.return_value = (
+            f'https://{m.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/private-bucket/lfs/aa/{oid}?X-Amz-Signature=fake')
+        result = m.sign_named_browser_download(s3, f'lfs/aa/{oid}', oid, 'Brakes and Pedals.SLDASM')
+        self.assertEqual('https', result['url'].split(':')[0])
+        kwargs = s3.generate_presigned_url.call_args.kwargs
+        self.assertEqual('get_object', s3.generate_presigned_url.call_args.args[0])
+        self.assertIn('filename="Brakes and Pedals.SLDASM"', kwargs['Params']['ResponseContentDisposition'])
+        self.assertEqual(900, kwargs['ExpiresIn'])
+        with self.assertRaises(m.ClientError):
+            m.sign_named_browser_download(s3, f'lfs/aa/{oid}', oid, '../invalid.SLDASM')
+
 
 if __name__ == '__main__':
     unittest.main()

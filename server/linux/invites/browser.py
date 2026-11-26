@@ -629,7 +629,7 @@ def thumbnail(session, path, ref):
     return raw_file(THUMB_PREFIX + path + ".jpg", ref, session["auth"]), immutable
 
 
-def _direct_r2_action(session, oid, size):
+def _direct_r2_action(session, oid, size, filename):
     """Get a short-lived download capability using this user's Gitea credentials."""
     account = os.getenv('R2_ACCOUNT_ID', '').strip().lower()
     if not re.fullmatch(r'[0-9a-f]{32}', account):
@@ -650,7 +650,43 @@ def _direct_r2_action(session, oid, size):
         parsed.port not in (None, 443) or parsed.username or parsed.password or
         not parsed.query):
         raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Gitea did not return a valid signed private-R2 URL.')
-    return url
+    # A redirect to Gitea's default signed URL downloads using the SHA-256 key
+    # as its filename. Re-sign through our *internal-only* R2 coordinator with a
+    # Content-Disposition response override, while keeping the download in R2.
+    bucket = os.getenv('R2_BUCKET', '').strip()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', bucket):
+        raise T.ApiError(HTTPStatus.SERVICE_UNAVAILABLE, 'R2 bucket is not configured for browser downloads.')
+    # Gitea uses S3 path addressing: /bucket/lfs/.../<sha256>. Validate the
+    # canonical prefix and SHA before asking the coordinator to sign anything.
+    key_prefix = '/' + bucket + '/lfs/'
+    r2_path = urllib.parse.unquote(parsed.path)
+    key = r2_path[len('/' + bucket + '/'):]
+    if (not r2_path.startswith(key_prefix) or
+        not key.startswith('lfs/') or
+        not key.endswith('/' + oid) or
+        any(x in ('', '.', '..') for x in key.split('/'))):
+        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Unexpected R2 file key returned by Gitea.')
+    try:
+        token_path = os.getenv('ADMIN_TOKEN_FILE', '/run/swvault/admin-token')
+        with open(token_path, 'r', encoding='utf-8') as f:
+            internal_token = f.read().strip()
+        if not internal_token:
+            raise ValueError('Missing internal token')
+        body = json.dumps({'key': key, 'oid': oid, 'filename': filename}).encode('utf-8')
+        request = urllib.request.Request('http://127.0.0.1:3200/internal/browser-download',
+                                         data=body, method='POST',
+                                         headers={'Content-Type': 'application/json',
+                                                  'X-SwVault-Internal-Token': internal_token})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.load(response)
+        destination = result.get('url', '')
+        r2_target = urllib.parse.urlsplit(destination)
+        if (r2_target.scheme != 'https' or r2_target.hostname != parsed.hostname or
+            r2_target.port not in (None, 443) or not r2_target.query):
+            raise ValueError('Unexpected R2 sign result')
+        return destination
+    except (OSError, ValueError, KeyError, urllib.error.URLError):
+        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Could not create a named R2 download. Contact the vault administrator.')
 
 
 def _stored_blob_preview(path, ref, auth):
@@ -673,7 +709,11 @@ def send_download(handler, session, path, ref, version):
     if pointer:
         oid = pointer.group(1).decode('ascii')
         size = int(pointer.group(2))
-        url = _direct_r2_action(session, oid, size)
+        name = path.rsplit('/', 1)[-1]
+        if version and re.fullmatch(r'\d{1,6}', str(version)):
+            stem, dot, ext = name.rpartition('.')
+            name = f'{stem} (v{version}).{ext}' if dot else f'{name} (v{version})'
+        url = _direct_r2_action(session, oid, size, name)
         # Browser fetches file bytes from R2 itself; never stream them through the VM.
         handler.send_response(HTTPStatus.FOUND)
         handler.send_header('Location', url)

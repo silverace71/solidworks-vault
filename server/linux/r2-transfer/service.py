@@ -10,6 +10,7 @@ outside Caddy and do not run on a production dataset without a restore test.
 """
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -329,6 +331,32 @@ def upload_status(username, session_id):
         return {'status': row['status'], 'oid': row['oid'], 'error': row['error']}
 
 
+def sign_named_browser_download(s3, key, oid, filename):
+    # The caller already verified that Gitea authorized this exact LFS OID.
+    if (not isinstance(oid, str) or not OID_RE.fullmatch(oid) or
+        not isinstance(key, str) or not key.startswith('lfs/') or
+        not key.endswith('/' + oid) or
+        any(x in ('', '.', '..') for x in key.split('/'))):
+        raise ClientError(400, 'Invalid LFS object key')
+    if (not isinstance(filename, str) or not filename or len(filename) > 220 or
+        any(ord(c) < 32 or ord(c) == 127 for c in filename) or
+        '/' in filename or '\\' in filename or filename in ('.', '..')):
+        raise ClientError(400, 'Invalid download filename')
+    ascii_name = re.sub(r'[^A-Za-z0-9._() -]', '_', filename).replace('"', '_')
+    disposition = ('attachment; filename="' + ascii_name +
+                   '"; filename*=UTF-8\'\'' + urllib.parse.quote(filename, safe=''))
+    signed = s3.generate_presigned_url('get_object', Params={
+        'Bucket': R2_BUCKET, 'Key': key,
+        'ResponseContentDisposition': disposition,
+        'ResponseContentType': 'application/octet-stream',
+    }, ExpiresIn=900, HttpMethod='GET')
+    parsed = urlparse(signed)
+    if (parsed.scheme != 'https' or
+        parsed.hostname != f'{R2_ACCOUNT_ID}.r2.cloudflarestorage.com'):
+        raise RuntimeError('Unexpected signed R2 download host')
+    return {'url': signed}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = 'SwVaultR2Transfer/1.4'
 
@@ -373,6 +401,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if self.path == '/internal/browser-download':
+                # Deliberately NOT routed by Caddy. Only the local invites
+                # process can call this path using the shared internal token.
+                provided = self.headers.get('X-SwVault-Internal-Token', '')
+                expected = admin_token()
+                if not expected or not hmac.compare_digest(provided, expected):
+                    raise ClientError(403, 'Forbidden')
+                try:
+                    length = int(self.headers.get('Content-Length', '-1'))
+                except ValueError:
+                    length = -1
+                if not 0 <= length <= REQUEST_LIMIT:
+                    raise ClientError(413, 'Invalid request size')
+                data = json.loads(self.rfile.read(length))
+                if not isinstance(data, dict):
+                    raise ClientError(400, 'Expected JSON object')
+                self.respond(200, sign_named_browser_download(
+                    self.server.s3, data.get('key'), data.get('oid'), data.get('filename')))
+                return
             if self.path not in ('/swvault-transfer/init', '/swvault-transfer/part',
                                  '/swvault-transfer/complete'):
                 raise ClientError(404, 'Not found')
