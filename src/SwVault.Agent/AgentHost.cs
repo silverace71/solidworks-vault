@@ -88,11 +88,14 @@ internal sealed class AgentHost : IDisposable
     /// registrations until the destination is armed. Restart on the UI thread
     /// to dispose all cached Git/LFS sessions after a successful migration.
     /// </summary>
+    private readonly CancellationTokenSource _migrationPolling = new();
+
     private async Task PollOneTimeMigrationAsync()
     {
-        for (var attempt = 0; attempt < 201; attempt++)
+        while (!_migrationPolling.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromMinutes(5)).ConfigureAwait(false);
+            try { await Task.Delay(TimeSpan.FromMinutes(5), _migrationPolling.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
             if (Team == null || Jobs.HasActiveJobs) continue;
             try
             {
@@ -784,6 +787,7 @@ internal sealed class AgentHost : IDisposable
 
     public void Dispose()
     {
+        _migrationPolling.Cancel();
         Log.Info("SwVault agent stopping");
         ReviewWatcher.Dispose();
         TeamWatcher.Dispose();

@@ -59,7 +59,7 @@ public sealed class LfsClient
 
             await Parallel.ForEachAsync(work, new ParallelOptions { MaxDegreeOfParallelism = Parallelism, CancellationToken = ct }, async (w, token) =>
             {
-                if (_r2Multipart != null && w.Item.Size >= 8 * 1024 * 1024)
+                if (_r2Multipart != null)
                     await _r2Multipart.UploadAsync(w.Item, tracker, token).ConfigureAwait(false);
                 else
                     await WithRetriesAsync(() => UploadOneAsync(w.Item, w.Obj, tracker, token), token).ConfigureAwait(false);

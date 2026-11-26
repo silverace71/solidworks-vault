@@ -8,6 +8,14 @@
   handle @invites {
     reverse_proxy 127.0.0.1:3100
   }
+  # No large native LFS PUTs through the Cloudflare proxy. Updated clients use R2.
+  @native_lfs_put {
+    method PUT
+    path_regexp lfs_upload ^/[^/]+/[^/]+\.git/info/lfs/objects/[0-9a-f]{64}/[0-9]+$
+  }
+  handle @native_lfs_put {
+    respond "Use SWVAULT direct R2 uploads" 413
+  }
   handle {
     reverse_proxy 127.0.0.1:3000
   }

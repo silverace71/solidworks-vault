@@ -629,37 +629,78 @@ def thumbnail(session, path, ref):
     return raw_file(THUMB_PREFIX + path + ".jpg", ref, session["auth"]), immutable
 
 
-def send_download(handler, session, path, ref, version):
-    path, ref = _clean_path(path), _clean_ref(ref)
-    url = f"{T.GITEA}/api/v1/{_repo_api('media/' + _quote_path(path))}" + (f"?ref={ref}" if ref else "")
+def _direct_r2_action(session, oid, size):
+    """Get a short-lived download capability using this user's Gitea credentials."""
+    account = os.getenv('R2_ACCOUNT_ID', '').strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{32}', account):
+        raise T.ApiError(HTTPStatus.SERVICE_UNAVAILABLE, 'R2 direct downloads are not configured.')
+    status, batch = _lfs('POST', 'objects/batch', session['auth'], {
+        'operation': 'download', 'transfers': ['basic'],
+        'objects': [{'oid': oid, 'size': size}],
+    })
+    if status != 200 or not isinstance(batch, dict):
+        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Gitea could not authorize an R2 download.')
+    objects = batch.get('objects') or []
+    obj = objects[0] if objects else {}
+    action = (obj.get('actions') or {}).get('download') or {}
+    url = action.get('href') or ''
+    parsed = urllib.parse.urlsplit(url)
+    if (obj.get('oid') != oid or parsed.scheme != 'https' or
+        parsed.hostname != f'{account}.r2.cloudflarestorage.com' or
+        parsed.port not in (None, 443) or parsed.username or parsed.password or
+        not parsed.query):
+        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Gitea did not return a valid signed private-R2 URL.')
+    return url
+
+
+def _stored_blob_preview(path, ref, auth):
+    """Read at most 4097 Git blob bytes; large non-LFS files must never hit this proxy."""
+    url = f"{T.GITEA}/api/v1/{_repo_api('raw/' + _quote_path(path))}?ref={urllib.parse.quote(ref or '')}"
     try:
-        response = _open(url, session["auth"])
+        with _open(url, auth) as response:
+            return response.read(4097)
     except urllib.error.HTTPError as e:
         raise T.ApiError(HTTPStatus.NOT_FOUND if e.code == 404 else HTTPStatus.BAD_GATEWAY,
-                         "That file (or version) isn't in the vault." if e.code == 404 else f"The vault server answered HTTP {e.code}.")
-    except urllib.error.URLError as e:
-        raise T.ApiError(HTTPStatus.BAD_GATEWAY, f"The vault server isn't answering ({e.reason}).")
-    with response:
-        name = path.rsplit("/", 1)[-1]
-        if version and re.fullmatch(r"\d{1,6}", str(version)):
-            stem, dot, ext = name.rpartition(".")
-            name = f"{stem} (v{version}).{ext}" if dot else f"{name} (v{version})"
-        ascii_name = re.sub(r'[^A-Za-z0-9._() -]', "_", name)
-        handler.send_response(HTTPStatus.OK)
-        handler.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
-        length = response.headers.get("Content-Length")
-        if length:
-            handler.send_header("Content-Length", length)
-        handler.send_header("Content-Disposition", f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{urllib.parse.quote(name)}")
-        handler.send_header("Cache-Control", "private, no-store")
-        handler.send_header("X-Content-Type-Options", "nosniff")
+                         'File not found.' if e.code == 404 else f'Gitea returned HTTP {e.code}.')
+    except urllib.error.URLError:
+        raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Gitea is unavailable.')
+
+
+def send_download(handler, session, path, ref, version):
+    path, ref = _clean_path(path), _clean_ref(ref)
+    stored = _stored_blob_preview(path, ref, session['auth'])
+    pointer = LFS_POINTER_RE.fullmatch(stored)
+    if pointer:
+        oid = pointer.group(1).decode('ascii')
+        size = int(pointer.group(2))
+        url = _direct_r2_action(session, oid, size)
+        # Browser fetches file bytes from R2 itself; never stream them through the VM.
+        handler.send_response(HTTPStatus.FOUND)
+        handler.send_header('Location', url)
+        handler.send_header('Cache-Control', 'private, no-store')
+        handler.send_header('Referrer-Policy', 'no-referrer')
+        handler.send_header('Content-Length', '0')
         handler.end_headers()
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            handler.wfile.write(chunk)
-    T.log(f"web browser: {session['login']} downloaded {path}" + (f" at {ref[:8]}" if ref else ""))
+        T.log(f"web browser: {session['login']} redirected LFS {oid[:12]} to private R2")
+        return
+    # Legacy small Git blobs aren't LFS objects and do not exist in R2.
+    # Keep those accessible; NEVER proxy a large Git blob from the VM.
+    if len(stored) > 4096:
+        raise T.ApiError(HTTPStatus.CONFLICT, 'Large non-LFS file: re-import it through the Windows client to store it in R2.')
+    name = path.rsplit('/', 1)[-1]
+    if version and re.fullmatch(r'\d{1,6}', str(version)):
+        stem, dot, ext = name.rpartition('.')
+        name = f'{stem} (v{version}).{ext}' if dot else f'{name} (v{version})'
+    ascii_name = re.sub(r'[^A-Za-z0-9._() -]', '_', name)
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header('Content-Type', mimetypes.guess_type(name)[0] or 'application/octet-stream')
+    handler.send_header('Content-Length', str(len(stored)))
+    handler.send_header('Content-Disposition', f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{urllib.parse.quote(name)}')
+    handler.send_header('Cache-Control', 'private, no-store')
+    handler.send_header('X-Content-Type-Options', 'nosniff')
+    handler.end_headers()
+    handler.wfile.write(stored)
+    T.log(f"web browser: {session['login']} downloaded small legacy Git file {path}")
 
 
 # ------------------------------------------------------------------ reviews (same issues as SwVault's Reviews.cs)

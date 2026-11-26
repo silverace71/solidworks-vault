@@ -10,17 +10,27 @@
     <Nullable>disable</Nullable>
     <SwInstallDir Condition="'$(SwInstallDir)' == ''">C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS</SwInstallDir>
     <SwApiRedist>$(SwInstallDir)\api\redist</SwApiRedist>
+    <!-- GitHub Actions runners do not have SOLIDWORKS installed.
+         Fall back to the interop DLLs tracked in this repository, as the add-in project does. -->
+    <SwApiRedist Condition="!Exists('$(SwApiRedist)\SolidWorks.Interop.sldworks.dll') Or !Exists('$(SwApiRedist)\SolidWorks.Interop.swconst.dll')">$(MSBuildThisFileDirectory)..\..\lib\solidworks</SwApiRedist>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="SolidWorks.Interop.sldworks">
       <HintPath>$(SwApiRedist)\SolidWorks.Interop.sldworks.dll</HintPath>
       <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
     </Reference>
     <Reference Include="SolidWorks.Interop.swconst">
       <HintPath>$(SwApiRedist)\SolidWorks.Interop.swconst.dll</HintPath>
       <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
     </Reference>
   </ItemGroup>
+
+  <Target Name="CheckSolidWorksApiReferences" BeforeTargets="ResolveAssemblyReferences"
+          Condition="!Exists('$(SwApiRedist)\SolidWorks.Interop.sldworks.dll') Or !Exists('$(SwApiRedist)\SolidWorks.Interop.swconst.dll')">
+    <Error Text="SOLIDWORKS interop assemblies not found in $(SwApiRedist). Install SOLIDWORKS or restore lib\solidworks DLLs from the repository." />
+  </Target>
 
 </Project>
