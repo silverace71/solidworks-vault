@@ -43,11 +43,13 @@ POST requests need the X-SwVault header, so other sites can't send them with the
 import base64
 import gzip
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -173,11 +175,55 @@ def _quote_path(path):
     return "/".join(urllib.parse.quote(part, safe="") for part in path.split("/"))
 
 
+# Server-side HTTP is exclusively loopback IPv4.  Do not send Gitea auth
+# headers to an HTTP proxy, a redirect destination, or a non-loopback host.
+# Client file bytes are NOT fetched here: signed R2 HTTPS URLs are returned
+# to the browser so the Windows machine downloads directly from R2.
+class _IPv4LoopbackConnection(http.client.HTTPConnection):
+    def connect(self):
+        if self.host != '127.0.0.1':
+            raise OSError('Only the IPv4 loopback Gitea/coordinator is allowed')
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            if self.source_address:
+                sock.bind(self.source_address)
+            sock.connect(('127.0.0.1', self.port))
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+
+
+class _IPv4LoopbackHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_IPv4LoopbackConnection, req)
+
+
+class _NoHTTPRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_LOCAL_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _IPv4LoopbackHandler(), _NoHTTPRedirects())
+
+
+def ipv4_local_urlopen(request, timeout=60):
+    """Direct AF_INET HTTP connection to 127.0.0.1, never through a proxy."""
+    target = request.full_url if isinstance(request, urllib.request.Request) else request
+    parsed = urllib.parse.urlsplit(target)
+    if (parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or
+        parsed.username or parsed.password or parsed.fragment or parsed.port not in (3000, 3200)):
+        raise ValueError('Refusing non-loopback or unexpected internal HTTP destination')
+    return _LOCAL_OPENER.open(request, timeout=timeout)
+
+
 def _open(url, auth, accept="*/*"):
     request = urllib.request.Request(url)
     request.add_header("Authorization", auth)
     request.add_header("Accept", accept)
-    return urllib.request.urlopen(request, timeout=60)
+    return ipv4_local_urlopen(request, timeout=60)
 
 
 def raw_file(path, ref, auth):
@@ -450,7 +496,7 @@ def _lfs(method, path, auth, body=None):
     if body is not None:
         request.add_header("Content-Type", "application/vnd.git-lfs+json")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with ipv4_local_urlopen(request, timeout=60) as response:
             return response.status, json.loads(response.read() or b"null")
     except urllib.error.HTTPError as e:
         try:
@@ -527,7 +573,7 @@ def release_checkout(session, body):
     request.add_header("Accept", "application/vnd.git-lfs+json")
     request.add_header("Content-Type", "application/vnd.git-lfs+json")
     try:
-        urllib.request.urlopen(request, timeout=60).close()
+        ipv4_local_urlopen(request, timeout=60).close()
     except urllib.error.HTTPError as e:
         raise T.ApiError(HTTPStatus.BAD_GATEWAY, f"Couldn't release the check-out (HTTP {e.code}).")
     except urllib.error.URLError as e:
@@ -680,7 +726,7 @@ def _direct_r2_action(session, oid, size, filename):
                                          data=body, method='POST',
                                          headers={'Content-Type': 'application/json',
                                                   'X-SwVault-Internal-Token': internal_token})
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with ipv4_local_urlopen(request, timeout=15) as response:
             result = json.load(response)
         destination = result.get('url', '')
         r2_target = urllib.parse.urlsplit(destination)
@@ -1233,6 +1279,8 @@ def request_update(session):
 
 
 def handle(handler, method, route):
+    if method == "GET" and route == "/api/download":
+        T.log("web browser: /api/download request reached Python")
     """Serves one request for the web browser. Errors are raised as T.ApiError."""
     if method == "GET" and route in STATIC:
         if handler.path.split("?", 1)[0] == "/swvault":  # relative links need the trailing slash
@@ -1292,7 +1340,12 @@ def handle(handler, method, route):
             raise T.ApiError(HTTPStatus.NOT_FOUND, "No preview saved for that version.")
         return _send(handler, HTTPStatus.OK, data, "image/jpeg", cache="private, max-age=604800, immutable" if immutable else "private, max-age=60")
     if method == "GET" and route == "/api/download":
-        return send_download(handler, session, query("path"), query("ref"), query("version"))
+        T.log("web browser: authenticated download handler entered (IPv4 loopback)")
+        try:
+            return send_download(handler, session, query("path"), query("ref"), query("version"))
+        except T.ApiError as error:
+            T.log(f"web browser: download rejected before redirect (HTTP {int(error.status)})")
+            raise
     if method == "GET" and route == "/api/reviews":
         return _json(handler, reviews(session, query("path")))
     if method == "POST" and route == "/api/reviews":

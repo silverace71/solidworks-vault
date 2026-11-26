@@ -73,7 +73,7 @@ class DownloadTests(unittest.TestCase):
             with patch.dict(m.os.environ, {'R2_ACCOUNT_ID': 'b' * 32,
                          'R2_BUCKET': 'private-bucket', 'ADMIN_TOKEN_FILE': str(path)}), \
                  patch.object(m, '_lfs', return_value=(200, batch)), \
-                 patch.object(m.urllib.request, 'urlopen', side_effect=OSError('signer unavailable')):
+                 patch.object(m, 'ipv4_local_urlopen', side_effect=OSError('signer unavailable')):
                 result = m._direct_r2_action(self.session, oid, 1315, 'Steering.SLDASM')
         self.assertEqual(result, gitea_url)
 
@@ -109,8 +109,37 @@ class DownloadTests(unittest.TestCase):
             path = Path(folder)/'admin-token'; path.write_text('secret')
             with patch.dict(m.os.environ, {'R2_ACCOUNT_ID':'b'*32, 'R2_BUCKET':'private-bucket', 'ADMIN_TOKEN_FILE':str(path)}), \
                  patch.object(m, '_lfs', return_value=(200, batch)), \
-                 patch.object(m.urllib.request, 'urlopen', side_effect=fake_open):
+                 patch.object(m, 'ipv4_local_urlopen', side_effect=fake_open):
                 result = m._direct_r2_action(self.session, oid, 1315, 'Brakes and Pedals.SLDASM')
         self.assertEqual(final_url, result)
         self.assertEqual('Brakes and Pedals.SLDASM', payloads[0]['filename'])
         self.assertEqual(oid, payloads[0]['oid'])
+
+class IPv4NetworkTests(unittest.TestCase):
+    def test_refuses_external_destinations_and_ipv6_localhost(self):
+        for address in ('http://localhost:3000/api/v1/user',
+                        'http://[::1]:3000/api/v1/user',
+                        'https://127.0.0.1:3000/api/v1/user',
+                        'http://127.0.0.1:9000/api/v1/user',
+                        'http://example.com:3000/api/v1/user'):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError):
+                    m.ipv4_local_urlopen(m.urllib.request.Request(address))
+
+    def test_uses_af_inet_socket_to_contact_loopback(self):
+        from unittest.mock import MagicMock
+        import socket
+        connection = m._IPv4LoopbackConnection('127.0.0.1', 3000, timeout=6)
+        fake_sock = MagicMock()
+        with patch.object(m.socket, 'socket', return_value=fake_sock) as factory:
+            connection.connect()
+        factory.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+        fake_sock.connect.assert_called_once_with(('127.0.0.1', 3000))
+        self.assertIs(connection.sock, fake_sock)
+
+    def test_ipv4_local_opener_never_uses_environment_proxy(self):
+        with patch.dict(m.os.environ, {'HTTP_PROXY':'http://example.com:9999'}), \
+             patch.object(m._LOCAL_OPENER, 'open', side_effect=OSError('sent direct')) as open_call:
+            with self.assertRaises(OSError):
+                m.ipv4_local_urlopen('http://127.0.0.1:3000/api/v1/user')
+        open_call.assert_called_once()

@@ -447,7 +447,7 @@ def gitea(method, path, body=None, auth=None):
         request.add_header("Content-Type", "application/json")
     request.add_header("Authorization", auth or f"token {admin_token()}")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with browser.ipv4_local_urlopen(request, timeout=30) as response:
             raw = response.read()
             return response.status, (json.loads(raw) if raw else None)
     except urllib.error.HTTPError as e:
