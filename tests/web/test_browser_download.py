@@ -66,7 +66,7 @@ class DownloadTests(unittest.TestCase):
         import tempfile
         oid = 'a' * 64
         host = 'b' * 32 + '.r2.cloudflarestorage.com'
-        gitea_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=already-authorized'
+        gitea_url = f'https://{host}/private-bucket/lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}?X-Amz-Signature=already-authorized'
         batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': gitea_url}}}]}
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'admin-token'; path.write_text('secret')
@@ -86,13 +86,26 @@ class DownloadTests(unittest.TestCase):
                 with self.assertRaises(ApiError):
                     m._direct_r2_action(self.session, oid, 1315, 'Steering.SLDASM')
 
+    def test_gitea_storage_path_must_match_entire_oid(self):
+        oid = 'a' * 64
+        host = 'b' * 32 + '.r2.cloudflarestorage.com'
+        # This URL incorrectly stores all 64 hash characters as the filename.
+        # The endpoint must never sign an unexpected key.
+        wrong_url = f'https://{host}/private-bucket/lfs/{oid[:2]}/{oid[2:4]}/{oid}?X-Amz-Signature=old'
+        batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': wrong_url}}}]}
+        with patch.dict(m.os.environ, {'R2_ACCOUNT_ID': 'b' * 32, 'R2_BUCKET': 'private-bucket'}), \
+             patch.object(m, '_lfs', return_value=(200, batch)):
+            with self.assertRaises(ApiError) as exc:
+                m._direct_r2_action(self.session, oid, 1315, 'Steering.SLDASM')
+        self.assertEqual(502, exc.exception.status)
+
     def test_browser_signer_preserves_filename_without_proxying_file_bytes(self):
         from unittest.mock import MagicMock
         import tempfile
         oid = 'a' * 64
         host = 'b' * 32 + '.r2.cloudflarestorage.com'
-        gitea_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=old'
-        final_url = f'https://{host}/private-bucket/lfs/aa/bb/{oid}?X-Amz-Signature=new'
+        gitea_url = f'https://{host}/private-bucket/lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}?X-Amz-Signature=old'
+        final_url = f'https://{host}/private-bucket/lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}?X-Amz-Signature=new'
         batch = {'objects': [{'oid': oid, 'actions': {'download': {'href': gitea_url}}}]}
         payloads = []
         class FakeResponse:

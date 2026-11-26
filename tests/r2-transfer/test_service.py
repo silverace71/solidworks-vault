@@ -146,15 +146,18 @@ class TransferTests(unittest.TestCase):
         oid = 'a' * 64
         s3 = MagicMock()
         s3.generate_presigned_url.return_value = (
-            f'https://{m.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/private-bucket/lfs/aa/{oid}?X-Amz-Signature=fake')
-        result = m.sign_named_browser_download(s3, f'lfs/aa/{oid}', oid, 'Brakes and Pedals.SLDASM')
+            f'https://{m.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/private-bucket/lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}?X-Amz-Signature=fake')
+        result = m.sign_named_browser_download(s3, f'lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}', oid, 'Brakes and Pedals.SLDASM')
         self.assertEqual('https', result['url'].split(':')[0])
         kwargs = s3.generate_presigned_url.call_args.kwargs
         self.assertEqual('get_object', s3.generate_presigned_url.call_args.args[0])
         self.assertIn('filename="Brakes and Pedals.SLDASM"', kwargs['Params']['ResponseContentDisposition'])
         self.assertEqual(900, kwargs['ExpiresIn'])
+        self.assertEqual(f'lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}', kwargs['Params']['Key'])
         with self.assertRaises(m.ClientError):
-            m.sign_named_browser_download(s3, f'lfs/aa/{oid}', oid, '../invalid.SLDASM')
+            m.sign_named_browser_download(s3, f'lfs/{oid[:2]}/{oid[2:4]}/{oid}', oid, 'Test.SLDASM')
+        with self.assertRaises(m.ClientError):
+            m.sign_named_browser_download(s3, f'lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}', oid, '../invalid.SLDASM')
 
 
 if __name__ == '__main__':

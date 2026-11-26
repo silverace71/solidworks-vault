@@ -333,10 +333,13 @@ def upload_status(username, session_id):
 
 def sign_named_browser_download(s3, key, oid, filename):
     # The caller already verified that Gitea authorized this exact LFS OID.
+    # Match the canonical Gitea LFS object key exactly. Gitea's
+    # Pointer.RelativePath() splits the 64-char OID into 2/2/60 digits.
+    # Verifying the full key stops the internal signer being used to retrieve
+    # unrelated objects elsewhere in this private bucket.
+    expected_key = f'lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}' if isinstance(oid, str) else ''
     if (not isinstance(oid, str) or not OID_RE.fullmatch(oid) or
-        not isinstance(key, str) or not key.startswith('lfs/') or
-        not key.endswith('/' + oid) or
-        any(x in ('', '.', '..') for x in key.split('/'))):
+        not isinstance(key, str) or key != expected_key):
         raise ClientError(400, 'Invalid LFS object key')
     if (not isinstance(filename, str) or not filename or len(filename) > 220 or
         any(ord(c) < 32 or ord(c) == 127 for c in filename) or

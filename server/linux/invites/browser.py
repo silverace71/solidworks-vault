@@ -705,16 +705,17 @@ def _direct_r2_action(session, oid, size, filename):
         # downloads just because the optional filename override is unavailable.
         T.log('web browser: named R2 download skipped (bucket config); using authenticated R2 URL')
         return url
-    # Gitea uses S3 path addressing: /bucket/lfs/.../<sha256>. Validate the
-    # canonical prefix and SHA before asking the coordinator to sign anything.
-    key_prefix = '/' + bucket + '/lfs/'
+    # Gitea LFS Pointer.RelativePath() stores only the last 60 characters
+    # in the filename: <oid[0:2]>/<oid[2:4]>/<oid[4:]>.
+    # See Gitea v1.27.3 modules/lfs/pointer.go.  Validate the *full* path
+    # against the authorized OID before passing it to the filename signer.
+    # We must not allow signing arbitrary bucket objects from user input.
     r2_path = urllib.parse.unquote(parsed.path)
-    key = r2_path[len('/' + bucket + '/'):]
-    if (not r2_path.startswith(key_prefix) or
-        not key.startswith('lfs/') or
-        not key.endswith('/' + oid) or
-        any(x in ('', '.', '..') for x in key.split('/'))):
+    expected_key = f'lfs/{oid[:2]}/{oid[2:4]}/{oid[4:]}'
+    expected_path = f'/{bucket}/{expected_key}'
+    if r2_path != expected_path:
         raise T.ApiError(HTTPStatus.BAD_GATEWAY, 'Unexpected R2 file key returned by Gitea.')
+    key = expected_key
     try:
         token_path = os.getenv('ADMIN_TOKEN_FILE', '/run/swvault/admin-token')
         with open(token_path, 'r', encoding='utf-8') as f:
