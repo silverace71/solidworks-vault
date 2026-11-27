@@ -1,12 +1,12 @@
 // Route: vault.lynxmotorsports.racing/swvault-invites/download*
-// R2 public custom domain: downloads.lynxmotorsports.racing
+// Set Worker environment variable R2_PUBLIC_BASE to your installer's public R2 hostname
 // Keep /swvault-invites/installer/latest on the existing invites service.
 // All versions are resolved from that service so old 1.2.9 clients still work.
-// R2 release files are populated by .github/workflows/release.yml.
+// R2 release files are populated by the installer-only Linux sync timer after GitHub releases.
 // If R2 is unavailable, the original server remains a safe download fallback.
 
-const R2_BASE = 'https://downloads.lynxmotorsports.racing';
-const TEAM = 'LYNXFSAE'; // Only used for older manually uploaded builds without a manifest.
+// Environment variables are deployment configuration, not secrets.
+// The default values preserve the original LYNXFSAE deployment.
 const MANIFEST_PREFIX = 'releases';
 
 function safeVersion(value) {
@@ -33,7 +33,9 @@ function directResponse(request, asset, filename, source) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
+    const R2_BASE = String(env.R2_PUBLIC_BASE || 'https://downloads.lynxmotorsports.racing').replace(/\/$/, '');
+    const TEAM = String(env.TEAM_SLUG || 'LYNXFSAE'); // For pre-manifest releases and download filenames.
     const url = new URL(request.url);
     if (url.pathname !== '/swvault-invites/download' || !['GET', 'HEAD'].includes(request.method)) {
       return fetch(request);
@@ -51,6 +53,7 @@ export default {
     };
 
     try {
+      if (!/^https:\/\/[^/]+$/.test(R2_BASE) || !/^[A-Za-z0-9_-]+$/.test(TEAM)) return origin();
       const latestUrl = new URL('/swvault-invites/installer/latest', url);
       const latestResponse = await fetch(latestUrl, {headers: {Accept: 'application/json'}, cf: {cacheTtl: 0}});
       if (!latestResponse.ok) return origin();
