@@ -1,6 +1,6 @@
-# Every night: if main changed since the last release, build and test it and make a GitHub release.
-# The team's server looks here each night (server/linux/auto-update.sh) and publishes what it finds,
-# so a change merged to main reaches everyone's SwVault by the next morning.
+# On pushes to main (and nightly), build and test any changed client, upload the installers
+# to R2, verify byte-for-byte and public-download access, then create the GitHub release.
+# The server's existing auto-update job publishes release metadata to clients after polling.
 #
 # Version: version.txt holds MAJOR.MINOR; the last number is the count of commits since that file
 # last changed. For a new minor or major version, edit version.txt (the count starts again at 0).
@@ -8,13 +8,21 @@
 # Repository variables (Settings > Secrets and variables > Actions > Variables):
 #   TEAM_JSON           the server's team.json (which vault the installer joins)
 #   TEAM_ICON_PNG_B64   optional: team-icon.png, base64 (the team's tray icon)
-name: Nightly release
+#   R2_PUBLIC_BASE     https://downloads.lynxmotorsports.racing
+#   R2_BUCKET          swvault-installers (optional, default)
+# Repository secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+name: Publish SwVault release (GitHub + R2)
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '7 7 * * *' # 07:07 UTC, about 1 AM in Colorado; the server checks at 10:30 UTC
   workflow_dispatch:
 
+# R2 is required for any new Windows installer release. The GitHub release is only
+# published after the ZIP and EXE are uploaded, read back, and publicly checked.
+# Server-only releases do not need to upload installers.
 permissions:
   contents: write
 
@@ -29,10 +37,13 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       release: ${{ steps.plan.outputs.release }}
       client: ${{ steps.plan.outputs.client }}
+      server: ${{ steps.plan.outputs.server }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Test installer download Worker (offline)
+        run: node .github/cloudflare/worker.test.mjs
       - id: plan
         run: |
           set -euo pipefail
@@ -41,18 +52,28 @@ jobs:
           since="$(git log -1 --format=%H -- version.txt)"
           version="$base.$(git rev-list --count "$since..HEAD")"
           previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
-          release=true; client=true
+          release=true; client=true; server=false
           if [[ -n "$previous" ]]; then
             # What ends up on people's PCs, and what ends up on the server. Docs and tests alone release nothing.
             git diff --quiet "$previous" HEAD -- src scripts lib Directory.Build.props Directory.Packages.props version.txt && client=false
-            if [[ "$client" == false ]] && git diff --quiet "$previous" HEAD -- server; then release=false; fi
+            git diff --quiet "$previous" HEAD -- server || server=true
+            if [[ "$client" == false && "$server" == false ]]; then release=false; fi
           fi
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then release=false; fi
-          [[ "$release" == true ]] || client=false
+          if [[ "$release" == true && -n "$previous" ]]; then
+            current_latest="${previous#v}"
+            max_version="$(printf '%s\n%s\n' "$current_latest" "$version" | sort -V | tail -n 1)"
+            if [[ "$max_version" != "$version" || "$current_latest" == "$version" ]]; then
+              echo "::error::Calculated $version is not newer than GitHub release $current_latest. Bump version.txt (e.g., 1.5) before publishing."
+              exit 1
+            fi
+          fi
+          if [[ "$release" != true ]]; then client=false; server=false; fi
           {
             echo "version=$version"
             echo "release=$release"
             echo "client=$client"
+            echo "server=$server"
           } >> "$GITHUB_OUTPUT"
           echo "Version $version (previous release: ${previous:-none}); release: $release; installer: $client" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Notes
@@ -62,15 +83,14 @@ jobs:
           git log --no-merges --format='- %s' ${previous:+"$previous..HEAD"} | head -n 40 > notes.md
           [[ -s notes.md ]] || echo "- Maintenance" > notes.md
           cat notes.md
-      - name: Check and pack the server files
-        if: steps.plan.outputs.release == 'true'
+      - name: Check and pack changed server files
+        # Only send a server tar when server/ actually changed since the last tag.
+        # This avoids replacing live R2 / cloudflared server files during client-only releases.
+        if: steps.plan.outputs.server == 'true'
         run: |
           set -euo pipefail
           for f in server/linux/*.sh server/backup/*.sh; do bash -n "$f"; done
-          python3 -m py_compile server/linux/invites/*.py server/linux/r2-transfer/service.py
-          python3 -m pip install 'boto3==1.40.74' 'requests==2.32.5'
-          python3 -m unittest discover -s tests/r2-transfer -p 'test_*.py' -v
-          python3 -m unittest discover -s tests/web -p 'test_*.py' -v
+          python3 -m py_compile server/linux/invites/*.py
           git archive --format=tar.gz -o swvault-server.tar.gz HEAD server
       - uses: actions/upload-artifact@v4
         if: steps.plan.outputs.release == 'true'
@@ -123,9 +143,37 @@ jobs:
             dist/*.zip
             dist/*-Setup.exe
 
-  release:
+  upload-r2:
     needs: [plan, build]
-    if: ${{ always() && needs.plan.outputs.release == 'true' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    if: needs.plan.outputs.client == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: dist
+      - name: Install AWS CLI for R2's S3 API (if runner does not have it)
+        run: |
+          if command -v aws >/dev/null 2>&1; then aws --version; else
+            python3 -m venv "$RUNNER_TEMP/r2-aws-cli"
+            "$RUNNER_TEMP/r2-aws-cli/bin/pip" install awscli
+            echo "$RUNNER_TEMP/r2-aws-cli/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Upload, read back, and verify public R2 downloads
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: bash .github/scripts/publish-r2.sh "$VERSION" dist
+
+  release:
+    needs: [plan, build, upload-r2]
+    if: ${{ always() && needs.plan.outputs.release == 'true' && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.upload-r2.result == 'success' || (needs.plan.outputs.client == 'false' && needs.upload-r2.result == 'skipped')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -138,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           ls -l
-          files=(swvault-server.tar.gz)
           shopt -s nullglob
-          files+=(*.zip *-Setup.exe)
+          files=(swvault-server.tar.gz *.zip *-Setup.exe)
+          (( ${#files[@]} > 0 )) || { echo 'No files for release' >&2; exit 1; }
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "SwVault $VERSION" --notes-file notes.md "${files[@]}"
